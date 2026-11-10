@@ -1,5 +1,6 @@
 "use client";
 
+import { useAppTimeZone } from "@/components/TimeZoneProvider";
 import { ButtonLink } from "@/components/ui/Button";
 import { EmptyState, ErrorState } from "@/components/ui/States";
 import { SkeletonCard } from "@/components/ui/Skeleton";
@@ -13,6 +14,7 @@ import { formatDateTime, formatInterval } from "@/lib/time";
  * (and the AI-generated notice) is on the run detail page.
  */
 export function SummariesTab({ groupId }: { groupId: string }) {
+  const timeZone = useAppTimeZone();
   const summaries = useResource(() => api.groupSummaries(groupId), [groupId]);
   const { data, error, loading, reload } = summaries;
 
@@ -66,7 +68,7 @@ export function SummariesTab({ groupId }: { groupId: string }) {
                 </p>
                 <p className="mt-1 text-xs text-slate-500">
                   {summary.provider} · {summary.model} · generated{" "}
-                  {formatDateTime(summary.createdAt, summary.interval.timezone)}
+                  {formatDateTime(summary.createdAt, timeZone)}
                 </p>
               </div>
               <ButtonLink

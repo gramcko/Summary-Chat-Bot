@@ -5,6 +5,7 @@ import Link from "next/link";
 import { useEffect, useState, type ReactNode } from "react";
 import { SummaryView } from "@/components/SummaryView";
 import { RunMessagesTab } from "@/components/runs/RunMessagesTab";
+import { useAppTimeZone } from "@/components/TimeZoneProvider";
 import { Alert } from "@/components/ui/Alert";
 import { RunStatusBadge, runStatusHint } from "@/components/ui/Badges";
 import { Button, ButtonLink } from "@/components/ui/Button";
@@ -46,9 +47,18 @@ const RUN_TABS: readonly TabDefinition[] = [
 
 export function RunDetailView({ runId }: { runId: string }) {
   const [tab, setTab] = useState<string>("summary");
+  const timeZone = useAppTimeZone();
   const run = useResource(() => api.run(runId), [runId]);
   const groups = useResource(() => api.groups(), []);
   const current = run.data;
+  const latestMessage = useResource(
+    () =>
+      current === null
+        ? Promise.resolve(null)
+        : api.groupMessages(current.groupId, { limit: 1 }),
+    [current?.groupId],
+  );
+  const lastMessageAt = latestMessage.data?.items[0]?.sentAt ?? null;
   const summary = useResource(
     () =>
       current?.status === "completed"
@@ -119,7 +129,7 @@ export function RunDetailView({ runId }: { runId: string }) {
         title={`Summary run ${shortId(current.id)}`}
         description={
           <>
-            Requested {formatDateTime(current.createdAt)} ·{" "}
+            Requested {formatDateTime(current.createdAt, timeZone)} ·{" "}
             {current.kind === "manual" ? "manual request" : "scheduled"}{" "}
             {polling ? "· refreshing automatically" : null}
           </>
@@ -167,14 +177,30 @@ export function RunDetailView({ runId }: { runId: string }) {
             <DetailItem label="Interval">
               {formatInterval(current.interval)}
             </DetailItem>
-            <DetailItem label="Time zone">{current.interval.timezone}</DetailItem>
+            <DetailItem label="Interval time zone">
+              {current.interval.timezone}
+            </DetailItem>
             <DetailItem label="Attempts">{current.attempts}</DetailItem>
-            <DetailItem label="Last update">
+            <DetailItem label="Run updated">
               <time dateTime={current.updatedAt}>
-                {formatDateTime(current.updatedAt)}
+                {formatDateTime(current.updatedAt, timeZone)}
               </time>
             </DetailItem>
+            <DetailItem label="Group messages updated">
+              {lastMessageAt === null ? (
+                <span className="text-slate-500">No messages captured yet.</span>
+              ) : (
+                <time dateTime={lastMessageAt}>
+                  {formatDateTime(lastMessageAt, timeZone)}
+                </time>
+              )}
+            </DetailItem>
           </dl>
+          <p className="mt-3 text-xs leading-5 text-slate-500">
+            “Run updated” is when this run record last changed (status,
+            attempts, or error). “Group messages updated” is the newest
+            captured message in the group.
+          </p>
         </CardBody>
       </Card>
 

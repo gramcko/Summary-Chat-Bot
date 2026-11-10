@@ -5,6 +5,7 @@ import Link from "next/link";
 import { useEffect, useRef, useState, type FormEvent } from "react";
 import { MessageBubble } from "@/components/messages/MessageBubble";
 import { useNotifications } from "@/components/notifications/NotificationProvider";
+import { useAppTimeZone } from "@/components/TimeZoneProvider";
 import { Alert } from "@/components/ui/Alert";
 import { Badge } from "@/components/ui/Badges";
 import { Button, ButtonLink } from "@/components/ui/Button";
@@ -34,6 +35,7 @@ export function ContactDetailView({ contactId }: { contactId: string }) {
   const [olderError, setOlderError] = useState<ApiError | null>(null);
   const requestId = useRef(0);
   const { notify } = useNotifications();
+  const timeZone = useAppTimeZone();
   const [editingName, setEditingName] = useState(false);
   const [nameDraft, setNameDraft] = useState("");
   const [savingName, setSavingName] = useState(false);
@@ -327,17 +329,18 @@ export function ContactDetailView({ contactId }: { contactId: string }) {
                 const previous = ordered[index - 1];
                 const showDay =
                   previous === undefined ||
-                  formatDayHeading(previous.sentAt) !==
-                    formatDayHeading(message.sentAt);
+                  formatDayHeading(previous.sentAt, timeZone) !==
+                    formatDayHeading(message.sentAt, timeZone);
                 return (
                   <li key={message.id}>
                     {showDay ? (
                       <p className="mb-3 text-center text-[11px] font-medium uppercase tracking-wide text-slate-400">
-                        {formatDayHeading(message.sentAt)}
+                        {formatDayHeading(message.sentAt, timeZone)}
                       </p>
                     ) : null}
                     <MessageBubble
                       message={message}
+                      timeZone={timeZone}
                       meta={<Badge tone="neutral">{message.groupName}</Badge>}
                     />
                   </li>

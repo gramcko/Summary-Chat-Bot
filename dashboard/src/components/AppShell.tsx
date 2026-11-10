@@ -12,6 +12,7 @@ import {
 import { api, toApiError } from "@/lib/api";
 import { errorMessage } from "@/lib/messages";
 import { NotificationProvider } from "./notifications/NotificationProvider";
+import { TimeZoneProvider } from "./TimeZoneProvider";
 import { Button } from "./ui/Button";
 
 type IconName =
@@ -264,7 +265,8 @@ export function AppShell({ children }: { children: ReactNode }) {
 
   return (
     <NotificationProvider>
-      <div className="min-h-dvh">
+      <TimeZoneProvider>
+        <div className="min-h-dvh">
       <a
         href="#main"
         className="sr-only focus:not-sr-only focus:absolute focus:left-4 focus:top-3 focus:z-50 focus:rounded-lg focus:bg-white focus:px-3 focus:py-2 focus:text-sm focus:font-medium focus:text-brand-700 focus:shadow-raised"
@@ -372,7 +374,8 @@ export function AppShell({ children }: { children: ReactNode }) {
           Could not sign out: {logoutError}
         </div>
       )}
-      </div>
+        </div>
+      </TimeZoneProvider>
     </NotificationProvider>
   );
 }

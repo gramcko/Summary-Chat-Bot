@@ -3,6 +3,7 @@
 import type { ContactSummary } from "@summarly/contracts";
 import Link from "next/link";
 import { useState } from "react";
+import { useAppTimeZone } from "@/components/TimeZoneProvider";
 import { Badge } from "@/components/ui/Badges";
 import { SelectField, TextField } from "@/components/ui/Field";
 import { EmptyState, ErrorState, PageHeader } from "@/components/ui/States";
@@ -13,6 +14,7 @@ import { useResource } from "@/lib/hooks";
 import { formatDateTime } from "@/lib/time";
 
 function ContactRow({ contact }: { contact: ContactSummary }) {
+  const timeZone = useAppTimeZone();
   return (
     <li>
       <Link
@@ -35,7 +37,7 @@ function ContactRow({ contact }: { contact: ContactSummary }) {
             {contact.messageCount === 1 ? "" : "s"}
             {contact.lastMessageAt === null
               ? ""
-              : ` · last ${formatDateTime(contact.lastMessageAt)}`}
+              : ` · last ${formatDateTime(contact.lastMessageAt, timeZone)}`}
           </p>
         </div>
         <span

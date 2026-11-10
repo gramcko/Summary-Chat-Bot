@@ -158,6 +158,9 @@ notifications.
 - Validation mirrors the contract rules (`HH:mm`, password ≥ 12, IANA time
   zone). Server-side `error.details[].path` entries are mapped back onto the
   matching form fields.
+- Generic UI timestamps (connection, runs, contacts, roster updates) use the
+  **Settings → Default time zone** value. Group-specific views (chat history,
+  run source messages, summary source refs) use the group/run time zone.
 - `src/lib/api.ts` exposes `setBrowserLocationForTests`, a narrow test seam that
   lets `tests/api.test.ts` cover the `401 → /login` rule without a DOM. It is
   only used by tests; passing `null` restores the real `window.location`.

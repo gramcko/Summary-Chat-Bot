@@ -38,6 +38,7 @@ function TimezoneEditor({
         timezone: timezone.trim(),
       });
       onSaved(updated);
+      window.dispatchEvent(new Event("summarly:timezone-changed"));
       notify({
         title: "Default time zone saved",
         description: `New groups will use ${updated.timezone}.`,

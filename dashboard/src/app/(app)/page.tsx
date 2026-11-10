@@ -3,6 +3,7 @@
 import type { ConnectionStatus, Group, SummaryRun } from "@summarly/contracts";
 import Link from "next/link";
 import type { ReactNode } from "react";
+import { useAppTimeZone } from "@/components/TimeZoneProvider";
 import { Alert } from "@/components/ui/Alert";
 import {
   Badge,
@@ -54,6 +55,7 @@ function Detail({ label, children }: { label: string; children: ReactNode }) {
 }
 
 export default function OverviewPage() {
+  const timeZone = useAppTimeZone();
   const overview = useResource(loadOverview, []);
   const { data, error, loading, reload } = overview;
 
@@ -107,7 +109,7 @@ export default function OverviewPage() {
                 <dl className="grid grid-cols-1 gap-4 sm:grid-cols-2">
                   <Detail label="State since">
                     <time dateTime={data.connection.since}>
-                      {formatDateTime(data.connection.since)}
+                      {formatDateTime(data.connection.since, timeZone)}
                     </time>
                   </Detail>
                   <Detail label="Last captured message">
@@ -115,7 +117,7 @@ export default function OverviewPage() {
                       <span className="text-slate-500">No messages captured yet.</span>
                     ) : (
                       <time dateTime={data.connection.lastMessageAt}>
-                        {formatDateTime(data.connection.lastMessageAt)}
+                        {formatDateTime(data.connection.lastMessageAt, timeZone)}
                       </time>
                     )}
                   </Detail>
@@ -179,7 +181,7 @@ export default function OverviewPage() {
                         </div>
                         <div className="flex shrink-0 flex-wrap items-center gap-3">
                           <span className="text-xs text-slate-500">
-                            {formatDateTime(run.createdAt)}
+                            {formatDateTime(run.createdAt, timeZone)}
                           </span>
                           <RunStatusBadge status={run.status} />
                         </div>

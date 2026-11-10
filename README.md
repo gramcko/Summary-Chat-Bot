@@ -30,8 +30,8 @@ Redis/BullMQ, and a Next.js dashboard.
 - **Collapsible sidebar** — icon-only rail on desktop, full labels when open.
 - **History import** — bounded, best-effort backfill of older messages for a
   monitored group (WhatsApp decides what history is available).
-- **Default time zone setting** — used for new groups and as the initial value
-  in the summary request form.
+- **Default time zone setting** — used for new groups, as the initial value
+  in the summary request form, and for generic dashboard timestamps.
 - **AI provider settings** — Google Gemini or the deterministic mock provider;
   saved API keys are encrypted server-side and never returned to the browser.
 
