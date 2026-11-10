@@ -108,11 +108,12 @@ nothing is restored.
 
 The app shell is a left sidebar (Overview, Groups, Contacts, Summary runs,
 Connection, Settings) with sign-out at the bottom. On desktop it is an
-icon-only rail that expands on hover/focus with an animated overlay; on small
-screens it becomes a focus-trapped drawer. A skip link, `<nav>`/`<main>`
-landmarks, visible focus rings, and `aria-live` async states are part of the
-shell. Summary-run status changes and other actions raise in-app toast
-notifications.
+icon-only rail that expands on hover/focus with an animated overlay; clicking
+a navigation item collapses it immediately, and moving the pointer out resets
+the hover expansion. On small screens it becomes a focus-trapped drawer. A
+skip link, `<nav>`/`<main>` landmarks, visible focus rings, and `aria-live`
+async states are part of the shell. Summary-run status changes and other
+actions raise in-app toast notifications.
 
 - `/setup` — one-time administrator password + recovery codes (shown once).
 - `/login`, `/recover` — session sign-in and single-use recovery code flow.
@@ -137,7 +138,10 @@ notifications.
   (tagged with the group), and an **Edit name** override.
 - `/runs` — request a manual summary (type-to-filter group picker that starts
   empty, optional custom instructions, 0–2000 characters with a counter) and
-  browse run history.
+  browse run history. Opening it from a group (`/runs?group=<id>`) preselects
+  that group. Selecting a group prefills the time zone and a 24-hour window
+  ending one minute after the group's newest captured message, so the request
+  covers real messages even when the group has been quiet for days.
 - `/runs/[id]` — run status, retry, custom instructions, and tabs for the
   generated **Summary** and the **Messages used** (the run's half-open
   interval).

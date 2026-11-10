@@ -86,7 +86,11 @@ export function GroupDetailView({ groupId }: { groupId: string }) {
                 <Badge tone={current.monitored ? "success" : "neutral"} dot>
                   {current.monitored ? "Monitored" : "Not monitored"}
                 </Badge>
-                <ButtonLink href="/runs" size="sm" variant="secondary">
+                <ButtonLink
+                  href={`/runs?group=${encodeURIComponent(current.id)}`}
+                  size="sm"
+                  variant="secondary"
+                >
                   Request a summary
                 </ButtonLink>
                 <Button

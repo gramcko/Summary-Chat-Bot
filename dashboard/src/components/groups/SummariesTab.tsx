@@ -44,7 +44,11 @@ export function SummariesTab({ groupId }: { groupId: string }) {
       <EmptyState
         title="No summaries yet"
         description="Completed summary runs for this group appear here. Request one for a group and period, or wait for the daily schedule."
-        action={<ButtonLink href="/runs">Request a summary</ButtonLink>}
+        action={
+          <ButtonLink href={`/runs?group=${encodeURIComponent(groupId)}`}>
+            Request a summary
+          </ButtonLink>
+        }
       />
     );
   }

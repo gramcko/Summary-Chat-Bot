@@ -184,6 +184,30 @@ export function defaultRunWindow(
   return { start, end };
 }
 
+/**
+ * Default manual-request window for a group whose newest captured message
+ * is `iso`: a rolling 24 hours ending one minute after that message. This
+ * makes a fresh request actually include the group's latest messages even
+ * when they are older than the current day.
+ */
+export function runWindowAroundLatest(
+  iso: string,
+  timeZone: string,
+): { start: string; end: string } {
+  const newest = new Date(iso);
+  if (Number.isNaN(newest.getTime())) return defaultRunWindow(timeZone);
+  const start = instantToWallTimeInZone(
+    new Date(newest.getTime() - DAY_MS),
+    timeZone,
+  );
+  const end = instantToWallTimeInZone(
+    new Date(newest.getTime() + 60_000),
+    timeZone,
+  );
+  if (start === null || end === null) return defaultRunWindow(timeZone);
+  return { start, end };
+}
+
 /** Formats an ISO instant for display, optionally in a specific time zone. */
 export function formatDateTime(iso: string, timeZone?: string): string {
   const date = new Date(iso);

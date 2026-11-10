@@ -1,6 +1,7 @@
 "use client";
 
 import type { SummaryRun } from "@summarly/contracts";
+import { useEffect, useState } from "react";
 import { Button, ButtonLink } from "@/components/ui/Button";
 import { EmptyState, ErrorState, PageHeader } from "@/components/ui/States";
 import { SkeletonCard } from "@/components/ui/Skeleton";
@@ -13,6 +14,14 @@ export default function RunsPage() {
   const groups = useResource(() => api.groups(), []);
   const runs = useResource(() => api.runs(), []);
   const defaultTimezone = useResource(() => api.defaultTimezone(), []);
+  const [requestedGroupId, setRequestedGroupId] = useState<string | null>(null);
+
+  // `?group=<id>` (from a group detail "Request a summary" link) preselects
+  // that group. Read after mount so the static page needs no Suspense boundary.
+  useEffect(() => {
+    const value = new URLSearchParams(window.location.search).get("group");
+    setRequestedGroupId(value === null || value === "" ? null : value);
+  }, []);
 
   function handleCreated(run: SummaryRun, created: boolean): void {
     if (!created) {
@@ -40,6 +49,12 @@ export default function RunsPage() {
   }
 
   const groupList = groups.data;
+  const initialGroupId =
+    requestedGroupId !== null &&
+    groupList !== null &&
+    groupList.some((group) => group.id === requestedGroupId)
+      ? requestedGroupId
+      : undefined;
 
   return (
     <div className="space-y-6">
@@ -84,8 +99,10 @@ export default function RunsPage() {
 
       {groupList !== null && groupList.length > 0 && !defaultTimezone.loading ? (
         <RequestRunForm
+          key={initialGroupId ?? "none"}
           groups={groupList}
           defaultTimezone={defaultTimezone.data?.timezone ?? "UTC"}
+          initialGroupId={initialGroupId}
           onCreated={handleCreated}
         />
       ) : null}

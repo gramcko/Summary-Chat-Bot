@@ -5,6 +5,7 @@ import {
   formatDateTime,
   formatInterval,
   instantToWallTimeInZone,
+  runWindowAroundLatest,
   wallTimeInZoneToInstant,
 } from "../src/lib/time.ts";
 
@@ -56,6 +57,34 @@ test("builds a default 24 hour window in the group zone", () => {
   assert.equal(window.end, "2026-07-01T12:00");
   assert.equal(window.start, "2026-06-30T12:00");
 
+  const start = wallTimeInZoneToInstant(window.start, "Europe/Madrid");
+  const end = wallTimeInZoneToInstant(window.end, "Europe/Madrid");
+  assert.ok(start instanceof Date);
+  assert.ok(end instanceof Date);
+  assert.equal(end.getTime() - start.getTime(), 24 * 60 * 60 * 1000);
+});
+
+test("builds a window around the newest captured message", () => {
+  const window = runWindowAroundLatest(
+    "2026-11-02T21:50:42.000Z",
+    "Europe/Madrid",
+  );
+  // Madrid is UTC+1 in November: 21:50:42Z is 22:50 wall time.
+  assert.equal(window.end, "2026-11-02T22:51");
+  assert.equal(window.start, "2026-11-01T22:50");
+
+  const start = wallTimeInZoneToInstant(window.start, "Europe/Madrid");
+  const end = wallTimeInZoneToInstant(window.end, "Europe/Madrid");
+  assert.ok(start instanceof Date);
+  assert.ok(end instanceof Date);
+  assert.equal(
+    end.getTime() - start.getTime(),
+    24 * 60 * 60 * 1000 + 60 * 1000,
+  );
+});
+
+test("falls back to the default window for an unusable timestamp", () => {
+  const window = runWindowAroundLatest("not-a-timestamp", "Europe/Madrid");
   const start = wallTimeInZoneToInstant(window.start, "Europe/Madrid");
   const end = wallTimeInZoneToInstant(window.end, "Europe/Madrid");
   assert.ok(start instanceof Date);

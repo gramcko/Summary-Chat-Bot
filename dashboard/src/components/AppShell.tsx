@@ -236,6 +236,19 @@ export function AppShell({ children }: { children: ReactNode }) {
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [loggingOut, setLoggingOut] = useState(false);
   const [logoutError, setLogoutError] = useState<string | null>(null);
+  const [suppressHover, setSuppressHover] = useState(false);
+
+  /**
+   * A nav click collapses the desktop rail immediately, even while the
+   * pointer is still over it. Moving the pointer out resets the flag, so
+   * the next hover expands normally.
+   */
+  function handleNavigate(): void {
+    setSuppressHover(true);
+    if (document.activeElement instanceof HTMLElement) {
+      document.activeElement.blur();
+    }
+  }
 
   // Close the mobile drawer whenever the route changes.
   useEffect(() => {
@@ -275,11 +288,22 @@ export function AppShell({ children }: { children: ReactNode }) {
       </a>
 
       {/* Desktop sidebar: icon rail, expands on hover/focus with an overlay */}
-      <aside className="group fixed inset-y-0 left-0 z-30 hidden w-[4.5rem] flex-col overflow-hidden border-r border-slate-200 bg-white shadow-sm transition-[width,box-shadow] duration-200 ease-out hover:w-64 hover:shadow-raised focus-within:w-64 focus-within:shadow-raised lg:flex">
+      <aside
+        className={`${
+          suppressHover ? "" : "group"
+        } fixed inset-y-0 left-0 z-30 hidden w-[4.5rem] flex-col overflow-hidden border-r border-slate-200 bg-white shadow-sm transition-[width,box-shadow] duration-200 ease-out lg:flex ${
+          suppressHover
+            ? ""
+            : "hover:w-64 hover:shadow-raised focus-within:w-64 focus-within:shadow-raised"
+        }`}
+        onMouseLeave={() => setSuppressHover(false)}
+        onFocusCapture={() => setSuppressHover(false)}
+      >
         <div className="flex h-16 shrink-0 items-center overflow-hidden px-4">
           <Link
             href="/"
             aria-label="Summarly home"
+            onClick={handleNavigate}
             className="flex w-full items-center rounded-lg"
           >
             <span className="max-w-0 overflow-hidden whitespace-nowrap text-sm font-semibold text-slate-900 opacity-0 transition-[max-width,opacity] duration-200 group-hover:max-w-[12rem] group-hover:opacity-100 group-focus-within:max-w-[12rem] group-focus-within:opacity-100">
@@ -288,7 +312,7 @@ export function AppShell({ children }: { children: ReactNode }) {
           </Link>
         </div>
         <div className="flex-1 overflow-y-auto px-2 pb-4 transition-[padding] duration-200 group-hover:px-3 group-focus-within:px-3">
-          <NavList pathname={pathname} hoverExpand />
+          <NavList pathname={pathname} hoverExpand onNavigate={handleNavigate} />
         </div>
         <div className="border-t border-slate-200 px-2 py-3 transition-[padding] duration-200 group-hover:px-3 group-focus-within:px-3">
           <SignOutButton

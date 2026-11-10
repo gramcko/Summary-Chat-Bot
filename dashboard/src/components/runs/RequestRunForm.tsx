@@ -17,7 +17,11 @@ import {
   normalizeInstructions,
   validateInstructions,
 } from "@/lib/instructions";
-import { defaultRunWindow, wallTimeInZoneToInstant } from "@/lib/time";
+import {
+  defaultRunWindow,
+  runWindowAroundLatest,
+  wallTimeInZoneToInstant,
+} from "@/lib/time";
 import {
   hasErrors,
   isValidIanaTimeZone,
@@ -29,6 +33,8 @@ interface RequestRunFormProps {
   groups: readonly Group[];
   /** Global default IANA zone used until a group is selected. */
   defaultTimezone: string;
+  /** Group to select on first render (e.g. arriving from a group detail). */
+  initialGroupId?: string;
   onCreated: (run: SummaryRun, created: boolean) => void;
 }
 
@@ -40,10 +46,11 @@ interface SubmitResult {
 export function RequestRunForm({
   groups,
   defaultTimezone,
+  initialGroupId,
   onCreated,
 }: RequestRunFormProps) {
   const { notify } = useNotifications();
-  const [groupId, setGroupId] = useState("");
+  const [groupId, setGroupId] = useState(initialGroupId ?? "");
   const [timezone, setTimezone] = useState(defaultTimezone);
   const [start, setStart] = useState("");
   const [end, setEnd] = useState("");
@@ -51,22 +58,48 @@ export function RequestRunForm({
   const [fieldErrors, setFieldErrors] = useState<FieldErrors>({});
   const [failure, setFailure] = useState<ApiError | null>(null);
   const [submitting, setSubmitting] = useState(false);
+  const [prefilling, setPrefilling] = useState(false);
   const [result, setResult] = useState<SubmitResult | null>(null);
   const lastPrefilledGroup = useRef<string | null>(null);
+  // Guards the asynchronous "latest message" prefill against stale responses
+  // when the user picks another group before the request finishes.
+  const prefillToken = useRef(0);
 
   const selectedGroupId = groupId;
 
-  // Prefill the time zone and a default window when the selected group changes.
+  // Prefill the time zone and window when the selected group changes. The
+  // window starts as the rolling default day, then moves to cover the group's
+  // newest captured message so a fresh request never silently covers an empty
+  // period (e.g. a group whose last message was days ago).
   useEffect(() => {
     const group = groups.find((candidate) => candidate.id === selectedGroupId);
     if (group === undefined) return;
     if (lastPrefilledGroup.current === group.id) return;
     lastPrefilledGroup.current = group.id;
     setTimezone(group.timezone);
-    const window = defaultRunWindow(group.timezone);
-    setStart(window.start);
-    setEnd(window.end);
+    const fallback = defaultRunWindow(group.timezone);
+    setStart(fallback.start);
+    setEnd(fallback.end);
     setResult(null);
+
+    const token = ++prefillToken.current;
+    setPrefilling(true);
+    void api
+      .groupMessages(group.id, { limit: 1 })
+      .then((page) => {
+        if (prefillToken.current !== token) return;
+        const newest = page.items[0]?.sentAt;
+        if (newest === undefined) return;
+        const window = runWindowAroundLatest(newest, group.timezone);
+        setStart(window.start);
+        setEnd(window.end);
+      })
+      .catch(() => {
+        // Keep the rolling default window; the user can still adjust it.
+      })
+      .finally(() => {
+        if (prefillToken.current === token) setPrefilling(false);
+      });
   }, [groups, selectedGroupId]);
 
   async function handleSubmit(event: FormEvent<HTMLFormElement>): Promise<void> {
@@ -279,12 +312,13 @@ export function RequestRunForm({
           )}
 
           <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
-            <Button type="submit" loading={submitting}>
+            <Button type="submit" loading={submitting} disabled={prefilling}>
               Request summary
             </Button>
             <p className="text-xs text-slate-500">
-              Generation runs in the background; you do not need to keep this page
-              open.
+              {prefilling
+                ? "Adjusting the period to include the group's latest messages…"
+                : "Generation runs in the background; you do not need to keep this page open."}
             </p>
           </div>
         </form>
