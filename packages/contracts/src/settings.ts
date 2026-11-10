@@ -68,3 +68,27 @@ export const DefaultTimezoneSettings = z.object({
 });
 
 export type DefaultTimezoneSettings = z.infer<typeof DefaultTimezoneSettings>;
+
+/**
+ * Display date formats offered in Settings. Stored as explicit pattern
+ * strings so the value is self-describing and stable regardless of the
+ * browser locale. Keep `dashboard/src/lib/time.ts` in sync.
+ */
+export const DATE_FORMATS = [
+  "DD/MM/YYYY",
+  "MM/DD/YYYY",
+  "YYYY-MM-DD",
+  "DD MMM YYYY",
+] as const;
+
+export const DateFormat = z.enum(DATE_FORMATS);
+export type DateFormat = z.infer<typeof DateFormat>;
+
+/** Global date format used by generic dashboard timestamps. */
+export const DefaultDateFormatSettings = z.object({
+  dateFormat: DateFormat,
+});
+
+export type DefaultDateFormatSettings = z.infer<
+  typeof DefaultDateFormatSettings
+>;

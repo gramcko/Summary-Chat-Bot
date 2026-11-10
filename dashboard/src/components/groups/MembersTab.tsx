@@ -1,7 +1,7 @@
 "use client";
 
 import type { GroupMember } from "@summarly/contracts";
-import { useAppTimeZone } from "@/components/TimeZoneProvider";
+import { useAppDateFormat, useAppTimeZone } from "@/components/TimeZoneProvider";
 import { Badge } from "@/components/ui/Badges";
 import { Card } from "@/components/ui/Card";
 import { EmptyState, ErrorState } from "@/components/ui/States";
@@ -38,6 +38,7 @@ function initials(member: GroupMember): string {
  */
 export function MembersTab({ groupId }: { groupId: string }) {
   const timeZone = useAppTimeZone();
+  const dateFormat = useAppDateFormat();
   const members = useResource(() => api.groupMembers(groupId), [groupId]);
   const { data, error, loading, reload } = members;
 
@@ -119,7 +120,7 @@ export function MembersTab({ groupId }: { groupId: string }) {
                   <span className="font-mono">{member.userId}</span>
                   {" · updated "}
                   <time dateTime={member.updatedAt}>
-                    {formatDateTime(member.updatedAt, timeZone)}
+                    {formatDateTime(member.updatedAt, timeZone, dateFormat)}
                   </time>
                 </p>
               </div>

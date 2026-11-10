@@ -46,7 +46,8 @@ import { PAIRING_CODE_TTL_MS } from "./adapter.js";
  * - the Baileys logger is silenced (its logs can carry chat metadata)
  * - `shouldIgnoreJid` drops every non-group JID before decryption
  * - history sync is disabled (no bulk backfill of old conversations)
- * - `markOnlineOnConnect` is off; own-message events are not emitted
+ * - `markOnlineOnConnect` is off; own group messages flow through the
+ *   normal capture path and keep their `fromMe` origin
  */
 
 export interface BaileysAdapterOptions {

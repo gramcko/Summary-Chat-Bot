@@ -216,7 +216,7 @@ message (the filter queries PostgreSQL per batch). Normalized into the
 | `senderKeyDistributionMessage` / history-sync notices **as the sole content** | — skipped (`system`) | — |
 | the same noise keys **bundled with real content** (WhatsApp delivers SKDM alongside text/media) | classified from the real content | the real text/caption (CR-M1: the message is never dropped) |
 | group-event stubs | — skipped (`system`) | — |
-| own messages (`fromMe`) | — skipped (`own-message`) | — |
+| own messages in a group (`fromMe`) | captured (`text`/`link`/`other`) | the real text/caption; origin kept in `messages.from_me` |
 | status broadcasts | — skipped (`status-broadcast`) | — |
 | non-group chats (DMs, newsletters) | — skipped (`not-group`) | — |
 | no usable content / no message id / no timestamp | — skipped (`unsupported-type`, `missing-id`, `missing-timestamp`) | — |
@@ -254,14 +254,17 @@ message (the filter queries PostgreSQL per batch). Normalized into the
   delivers the self-addressed on-demand history response as a
   device-to-self message that must decrypt to be read. Everything else
   (DMs, newsletters, other non-group JIDs) is still never decrypted.
-  Own-origin messages (`fromMe`) and non-group payloads are normalized
-  and DROPPED (`own-message`/`not-group` skips) — never persisted, not
-  even as the self-chat/DM echoes that come with the self-addressed
-  traffic. Residual trade-off, stated honestly: own-origin traffic
-  (including self-chat and DM echoes) is decrypted in memory only to
-  reach the history response. Replays that WhatsApp may still deliver
-  (`append` upserts) flow through the same idempotent path and can
-  never duplicate rows.
+  Own-origin messages in monitored group chats are **captured**: the
+  linked account is the administrator's own WhatsApp, so their messages
+  are part of the conversation being summarized. The WhatsApp origin is
+  stored in `messages.from_me` for the history anchor. Non-group
+  own-origin payloads (self-chat and DM echoes) are normalized and
+  DROPPED (`not-group` skip) — never persisted. Residual trade-off,
+  stated honestly: own-origin traffic is decrypted in memory to capture
+  group messages and to reach the self-addressed history response;
+  non-group payloads are still never persisted. Replays that WhatsApp may
+  still deliver (`append` upserts) flow through the same idempotent path
+  and can never duplicate rows.
 
 ### 8. Logging rules (strict)
 

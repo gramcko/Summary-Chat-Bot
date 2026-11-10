@@ -71,7 +71,7 @@ export interface TextFieldProps {
   label: ReactNode;
   value: string;
   onChange: (value: string) => void;
-  type?: "text" | "password" | "url" | "time" | "datetime-local";
+  type?: "text" | "password" | "url" | "time" | "date" | "datetime-local";
   hint?: string;
   error?: string;
   required?: boolean;

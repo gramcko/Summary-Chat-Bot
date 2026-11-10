@@ -286,7 +286,7 @@ export class FakeDb implements BotDb {
     if (row === undefined) return null;
     return {
       messageId: row.whatsappMessageId,
-      fromMe: false,
+      fromMe: row.fromMe,
       timestampSec: Math.floor(row.sentAt.getTime() / 1000),
     };
   }

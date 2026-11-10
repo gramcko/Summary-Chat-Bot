@@ -11,9 +11,39 @@
  * interpretation of an ambiguous wall time is not defined by the platform).
  */
 
+import type { DateFormat } from "@summarly/contracts";
+
 const WALL_TIME_PATTERN = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})(?::(\d{2}))?$/;
 
 const DAY_MS = 24 * 60 * 60 * 1000;
+
+/**
+ * Display date formats offered in Settings. Keep in sync with the
+ * `DATE_FORMATS` contract enum (`packages/contracts/src/settings.ts`).
+ */
+export const DATE_FORMATS: readonly DateFormat[] = [
+  "DD/MM/YYYY",
+  "MM/DD/YYYY",
+  "YYYY-MM-DD",
+  "DD MMM YYYY",
+];
+
+export const DEFAULT_DATE_FORMAT: DateFormat = "DD/MM/YYYY";
+
+const MONTHS_SHORT = [
+  "Jan",
+  "Feb",
+  "Mar",
+  "Apr",
+  "May",
+  "Jun",
+  "Jul",
+  "Aug",
+  "Sep",
+  "Oct",
+  "Nov",
+  "Dec",
+] as const;
 
 function formatter(
   timeZone: string,
@@ -208,44 +238,125 @@ export function runWindowAroundLatest(
   return { start, end };
 }
 
-/** Formats an ISO instant for display, optionally in a specific time zone. */
-export function formatDateTime(iso: string, timeZone?: string): string {
-  const date = new Date(iso);
-  if (Number.isNaN(date.getTime())) return iso;
+/**
+ * Year/month/day of `date` in `timeZone` (or the browser zone when
+ * omitted). An unknown zone falls back to the browser zone.
+ */
+function datePartsInZone(
+  date: Date,
+  timeZone?: string,
+): { year: string; month: string; day: string } | null {
+  function build(zone?: string): {
+    year: string;
+    month: string;
+    day: string;
+  } | null {
+    try {
+      const record = partsToRecord(
+        new Intl.DateTimeFormat("en-US", {
+          year: "numeric",
+          month: "2-digit",
+          day: "2-digit",
+          ...(zone === undefined ? {} : { timeZone: zone }),
+        }).formatToParts(date),
+      );
+      const { year, month, day } = record;
+      if (year === undefined || month === undefined || day === undefined) {
+        return null;
+      }
+      return { year, month, day };
+    } catch {
+      return null;
+    }
+  }
 
-  const options: Intl.DateTimeFormatOptions = {
-    dateStyle: "medium",
-    timeStyle: "short",
-  };
+  if (timeZone !== undefined) {
+    const withZone = build(timeZone);
+    if (withZone !== null) return withZone;
+  }
+  return build();
+}
 
-  try {
-    return new Intl.DateTimeFormat(
-      undefined,
-      timeZone === undefined ? options : { ...options, timeZone },
-    ).format(date);
-  } catch {
-    return new Intl.DateTimeFormat(undefined, options).format(date);
+function renderDate(
+  parts: { year: string; month: string; day: string },
+  dateFormat: DateFormat,
+): string {
+  switch (dateFormat) {
+    case "MM/DD/YYYY":
+      return `${parts.month}/${parts.day}/${parts.year}`;
+    case "YYYY-MM-DD":
+      return `${parts.year}-${parts.month}-${parts.day}`;
+    case "DD MMM YYYY": {
+      const month = MONTHS_SHORT[Number(parts.month) - 1] ?? parts.month;
+      return `${parts.day} ${month} ${parts.year}`;
+    }
+    case "DD/MM/YYYY":
+      return `${parts.day}/${parts.month}/${parts.year}`;
+    default:
+      return `${parts.day}/${parts.month}/${parts.year}`;
   }
 }
 
-/** Day heading for the chat view (`Mon, 3 Nov 2026`), optionally in a zone. */
-export function formatDayHeading(iso: string, timeZone?: string): string {
+/** Formats an ISO instant as a date in the chosen pattern and zone. */
+export function formatDate(
+  iso: string,
+  timeZone?: string,
+  dateFormat: DateFormat = DEFAULT_DATE_FORMAT,
+): string {
   const date = new Date(iso);
-  if (Number.isNaN(date.getTime())) return "";
-  const options: Intl.DateTimeFormatOptions = {
-    weekday: "short",
-    day: "numeric",
-    month: "short",
-    year: "numeric",
-  };
+  if (Number.isNaN(date.getTime())) return iso;
+  const parts = datePartsInZone(date, timeZone);
+  if (parts === null) return iso;
+  return renderDate(parts, dateFormat);
+}
+
+/** Formats an ISO instant for display, optionally in a specific time zone. */
+export function formatDateTime(
+  iso: string,
+  timeZone?: string,
+  dateFormat: DateFormat = DEFAULT_DATE_FORMAT,
+): string {
+  const date = new Date(iso);
+  if (Number.isNaN(date.getTime())) return iso;
+
+  const datePart = formatDate(iso, timeZone, dateFormat);
+  const options: Intl.DateTimeFormatOptions = { timeStyle: "short" };
+  let timePart: string;
   try {
-    return new Intl.DateTimeFormat(
+    timePart = new Intl.DateTimeFormat(
       undefined,
       timeZone === undefined ? options : { ...options, timeZone },
     ).format(date);
   } catch {
-    return new Intl.DateTimeFormat(undefined, options).format(date);
+    timePart = new Intl.DateTimeFormat(undefined, options).format(date);
   }
+  return `${datePart}, ${timePart}`;
+}
+
+/** Day heading for the chat view (`Mon, 03/11/2026`), in the chosen pattern. */
+export function formatDayHeading(
+  iso: string,
+  timeZone?: string,
+  dateFormat: DateFormat = DEFAULT_DATE_FORMAT,
+): string {
+  const date = new Date(iso);
+  if (Number.isNaN(date.getTime())) return "";
+  let weekday: string;
+  try {
+    weekday = new Intl.DateTimeFormat(
+      undefined,
+      timeZone === undefined
+        ? { weekday: "short" }
+        : { weekday: "short", timeZone },
+    ).format(date);
+  } catch {
+    weekday = new Intl.DateTimeFormat(undefined, { weekday: "short" }).format(
+      date,
+    );
+  }
+  const parts = datePartsInZone(date, timeZone);
+  if (parts === null) return weekday;
+  return `${weekday}, ${renderDate(parts, dateFormat)}`;
 }
 
 /** Clock time (`14:05`), optionally in a zone, for chat timestamps. */
@@ -264,24 +375,34 @@ export function formatTimeOnly(iso: string, timeZone?: string): string {
 }
 
 /** Human readable half-open interval, rendered in the run's own time zone. */
-export function formatInterval(interval: {
-  start: string;
-  end: string;
-  timezone: string;
-}): string {
-  return `${formatDateTime(interval.start, interval.timezone)} → ${formatDateTime(
+export function formatInterval(
+  interval: {
+    start: string;
+    end: string;
+    timezone: string;
+  },
+  dateFormat: DateFormat = DEFAULT_DATE_FORMAT,
+): string {
+  return `${formatDateTime(
+    interval.start,
+    interval.timezone,
+    dateFormat,
+  )} → ${formatDateTime(
     interval.end,
     interval.timezone,
+    dateFormat,
   )} (${interval.timezone})`;
 }
 
 /** ISO date (`YYYY-MM-DD`) for a `TaskItem.dueDate`, or a fallback label. */
-export function formatDueDate(dueDate: string | null): string {
+export function formatDueDate(
+  dueDate: string | null,
+  dateFormat: DateFormat = DEFAULT_DATE_FORMAT,
+): string {
   if (dueDate === null) return "not specified";
   const date = new Date(`${dueDate}T00:00:00Z`);
   if (Number.isNaN(date.getTime())) return dueDate;
-  return new Intl.DateTimeFormat(undefined, {
-    dateStyle: "medium",
-    timeZone: "UTC",
-  }).format(date);
+  const parts = datePartsInZone(date, "UTC");
+  if (parts === null) return dueDate;
+  return renderDate(parts, dateFormat);
 }

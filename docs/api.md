@@ -103,6 +103,8 @@ in-memory throttle.
 | PUT | `/api/settings/ai-provider` | `ProviderConfigPublic` | Upsert. `apiKey`: omit = keep, string = replace, `null` = clear. |
 | GET | `/api/settings/default-timezone` | `DefaultTimezoneSettings` | Global IANA zone for NEW groups and the summary form's initial value. |
 | PUT | `/api/settings/default-timezone` | `DefaultTimezoneSettings` | Sets the global default zone (`{ "timezone": "America/Caracas" }`). `400` unknown zone. |
+| GET | `/api/settings/default-date-format` | `DefaultDateFormatSettings` | Global date pattern for dashboard timestamps. Defaults to `DD/MM/YYYY`. |
+| PUT | `/api/settings/default-date-format` | `DefaultDateFormatSettings` | Sets the pattern (`{ "dateFormat": "YYYY-MM-DD" }`). `400` unknown pattern. |
 
 AI provider strings (ADR 0005): enter `provider: "google-gemini"` with
 `model: "gemini-3.8-flash"` (or the cheaper `gemini-3.5-flash-lite`) to

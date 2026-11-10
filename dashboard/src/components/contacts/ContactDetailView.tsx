@@ -5,7 +5,7 @@ import Link from "next/link";
 import { useEffect, useRef, useState, type FormEvent } from "react";
 import { MessageBubble } from "@/components/messages/MessageBubble";
 import { useNotifications } from "@/components/notifications/NotificationProvider";
-import { useAppTimeZone } from "@/components/TimeZoneProvider";
+import { useAppDateFormat, useAppTimeZone } from "@/components/TimeZoneProvider";
 import { Alert } from "@/components/ui/Alert";
 import { Badge } from "@/components/ui/Badges";
 import { Button, ButtonLink } from "@/components/ui/Button";
@@ -36,6 +36,7 @@ export function ContactDetailView({ contactId }: { contactId: string }) {
   const requestId = useRef(0);
   const { notify } = useNotifications();
   const timeZone = useAppTimeZone();
+  const dateFormat = useAppDateFormat();
   const [editingName, setEditingName] = useState(false);
   const [nameDraft, setNameDraft] = useState("");
   const [savingName, setSavingName] = useState(false);
@@ -329,13 +330,13 @@ export function ContactDetailView({ contactId }: { contactId: string }) {
                 const previous = ordered[index - 1];
                 const showDay =
                   previous === undefined ||
-                  formatDayHeading(previous.sentAt, timeZone) !==
-                    formatDayHeading(message.sentAt, timeZone);
+                  formatDayHeading(previous.sentAt, timeZone, dateFormat) !==
+                    formatDayHeading(message.sentAt, timeZone, dateFormat);
                 return (
                   <li key={message.id}>
                     {showDay ? (
                       <p className="mb-3 text-center text-[11px] font-medium uppercase tracking-wide text-slate-400">
-                        {formatDayHeading(message.sentAt, timeZone)}
+                        {formatDayHeading(message.sentAt, timeZone, dateFormat)}
                       </p>
                     ) : null}
                     <MessageBubble

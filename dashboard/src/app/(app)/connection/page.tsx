@@ -4,7 +4,7 @@ import type { ConnectionStatus } from "@summarly/contracts";
 import { useEffect, useState, type ReactNode } from "react";
 import { PairingDetails } from "@/components/connection/PairingDetails";
 import { useNotifications } from "@/components/notifications/NotificationProvider";
-import { useAppTimeZone } from "@/components/TimeZoneProvider";
+import { useAppDateFormat, useAppTimeZone } from "@/components/TimeZoneProvider";
 import { Alert } from "@/components/ui/Alert";
 import { ConnectionBadge, connectionHint } from "@/components/ui/Badges";
 import { Button } from "@/components/ui/Button";
@@ -35,6 +35,7 @@ function Detail({ label, children }: { label: string; children: ReactNode }) {
 
 function LinkedPanel({ status }: { status: ConnectionStatus }) {
   const timeZone = useAppTimeZone();
+  const dateFormat = useAppDateFormat();
   return (
     <div className="flex flex-col items-center gap-3 rounded-2xl border border-emerald-200 bg-emerald-50 px-6 py-10 text-center">
       <span
@@ -53,7 +54,7 @@ function LinkedPanel({ status }: { status: ConnectionStatus }) {
       <dl className="mt-2 grid grid-cols-1 gap-3 text-left sm:grid-cols-2">
         <Detail label="Connected since">
           <time dateTime={status.since}>
-            {formatDateTime(status.since, timeZone)}
+            {formatDateTime(status.since, timeZone, dateFormat)}
           </time>
         </Detail>
         <Detail label="Last captured message">
@@ -61,7 +62,7 @@ function LinkedPanel({ status }: { status: ConnectionStatus }) {
             <span className="text-slate-500">No messages captured yet.</span>
           ) : (
             <time dateTime={status.lastMessageAt}>
-              {formatDateTime(status.lastMessageAt, timeZone)}
+              {formatDateTime(status.lastMessageAt, timeZone, dateFormat)}
             </time>
           )}
         </Detail>
@@ -76,6 +77,7 @@ function SessionCheckView({
   check: ConnectionStatus["check"];
 }) {
   const timeZone = useAppTimeZone();
+  const dateFormat = useAppDateFormat();
   if (check === null) {
     return (
       <p className="text-xs text-slate-500">
@@ -108,7 +110,7 @@ function SessionCheckView({
           : (check.error ?? "No response from the session.")}
         {check.checkedAt === null
           ? ""
-          : ` · ${formatDateTime(check.checkedAt, timeZone)}`}
+          : ` · ${formatDateTime(check.checkedAt, timeZone, dateFormat)}`}
       </p>
     </div>
   );
@@ -119,6 +121,7 @@ export default function ConnectionPage() {
   const status = connection.data;
   const { notify } = useNotifications();
   const timeZone = useAppTimeZone();
+  const dateFormat = useAppDateFormat();
   /**
    * After an unlink the bot worker re-arms pairing within seconds. The status
    * can still read "connected" for a moment (the request is asynchronous), so
@@ -281,7 +284,7 @@ export default function ConnectionPage() {
                 <dl className="grid grid-cols-1 gap-4 sm:grid-cols-2">
                   <Detail label="State since">
                     <time dateTime={status.since}>
-                      {formatDateTime(status.since, timeZone)}
+                      {formatDateTime(status.since, timeZone, dateFormat)}
                     </time>
                   </Detail>
                   <Detail label="Last captured message">
@@ -289,7 +292,7 @@ export default function ConnectionPage() {
                       <span className="text-slate-500">No messages captured yet.</span>
                     ) : (
                       <time dateTime={status.lastMessageAt}>
-                        {formatDateTime(status.lastMessageAt, timeZone)}
+                        {formatDateTime(status.lastMessageAt, timeZone, dateFormat)}
                       </time>
                     )}
                   </Detail>

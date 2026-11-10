@@ -155,8 +155,9 @@ export interface BotDb {
    * for on-demand history (ADR 0007). WhatsApp's
    * `historySyncOnDemandRequest` requires a real message key; a request
    * without one is silently ignored (observed as `history_timeout`).
-   * Null when the chat has no captured messages yet. Own messages are
-   * never captured, so `fromMe` is always false here.
+   * Null when the chat has no captured messages yet. The oldest row's
+   * `fromMe` flag is preserved so the history anchor matches WhatsApp's
+   * expectation for own messages.
    */
   getOldestMessageCursor(chatId: string): Promise<HistoryCursor | null>;
 
@@ -361,7 +362,7 @@ export class PostgresBotDb implements BotDb {
         let param = 2;
         for (const row of chunk) {
           tuples.push(
-            `($1::uuid, $${param}::text, $${param + 1}::text, $${param + 2}::text, $${param + 3}::text, $${param + 4}::timestamptz, $${param + 5}::text, $${param + 6}::text)`,
+            `($1::uuid, $${param}::text, $${param + 1}::text, $${param + 2}::text, $${param + 3}::text, $${param + 4}::timestamptz, $${param + 5}::text, $${param + 6}::text, $${param + 7}::boolean)`,
           );
           values.push(
             row.chatJid,
@@ -371,8 +372,9 @@ export class PostgresBotDb implements BotDb {
             row.sentAt,
             row.body,
             row.messageType,
+            row.fromMe,
           );
-          param += 7;
+          param += 8;
         }
         // Privacy boundary INSIDE the write (audit M4): a row is only
         // inserted when its chat is currently monitored — even if the
@@ -380,11 +382,11 @@ export class PostgresBotDb implements BotDb {
         // between filter and insert is never written).
         const result = await client.query(
           `INSERT INTO messages
-             (connection_id, chat_id, whatsapp_message_id, sender_id, sender_name, sent_at, body, message_type)
+             (connection_id, chat_id, whatsapp_message_id, sender_id, sender_name, sent_at, body, message_type, from_me)
            SELECT t.connection_id, t.chat_id, t.whatsapp_message_id,
-                  t.sender_id, t.sender_name, t.sent_at, t.body, t.message_type
+                  t.sender_id, t.sender_name, t.sent_at, t.body, t.message_type, t.from_me
            FROM (VALUES ${tuples.join(", ")}) AS t
-             (connection_id, chat_id, whatsapp_message_id, sender_id, sender_name, sent_at, body, message_type)
+             (connection_id, chat_id, whatsapp_message_id, sender_id, sender_name, sent_at, body, message_type, from_me)
            WHERE EXISTS (
              SELECT 1 FROM groups g
              WHERE g.chat_id = t.chat_id AND g.monitored = true
@@ -498,8 +500,9 @@ export class PostgresBotDb implements BotDb {
     const result = await this.pool.query<{
       whatsapp_message_id: string;
       sent_at: Date;
+      from_me: boolean;
     }>(
-      `SELECT whatsapp_message_id, sent_at
+      `SELECT whatsapp_message_id, sent_at, from_me
        FROM messages
        WHERE chat_id = $1
        ORDER BY sent_at ASC, id ASC
@@ -510,7 +513,7 @@ export class PostgresBotDb implements BotDb {
     if (row === undefined) return null;
     return {
       messageId: row.whatsapp_message_id,
-      fromMe: false,
+      fromMe: row.from_me,
       timestampSec: Math.floor(row.sent_at.getTime() / 1000),
     };
   }

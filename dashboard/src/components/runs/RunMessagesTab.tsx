@@ -3,6 +3,7 @@
 import type { ApiMessage, Interval } from "@summarly/contracts";
 import { useEffect, useRef, useState } from "react";
 import { MessageBubble } from "@/components/messages/MessageBubble";
+import { useAppDateFormat } from "@/components/TimeZoneProvider";
 import { Alert } from "@/components/ui/Alert";
 import { Button } from "@/components/ui/Button";
 import { EmptyState, ErrorState } from "@/components/ui/States";
@@ -22,6 +23,7 @@ export function RunMessagesTab({
   groupId: string;
   interval: Interval;
 }) {
+  const dateFormat = useAppDateFormat();
   const [messages, setMessages] = useState<ApiMessage[]>([]);
   const [nextCursor, setNextCursor] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
@@ -87,7 +89,7 @@ export function RunMessagesTab({
   return (
     <div className="space-y-4">
       <p className="text-xs leading-5 text-slate-500">
-        Messages captured in {formatInterval(interval)} (the summary&apos;s
+        Messages captured in {formatInterval(interval, dateFormat)} (the summary&apos;s
         half-open period, {interval.timezone}). Times are shown in the group
         time zone.
       </p>
@@ -145,13 +147,13 @@ export function RunMessagesTab({
               const previous = ordered[index - 1];
               const showDay =
                 previous === undefined ||
-                formatDayHeading(previous.sentAt, interval.timezone) !==
-                  formatDayHeading(message.sentAt, interval.timezone);
+                formatDayHeading(previous.sentAt, interval.timezone, dateFormat) !==
+                  formatDayHeading(message.sentAt, interval.timezone, dateFormat);
               return (
                 <li key={message.id}>
                   {showDay ? (
                     <p className="mb-3 text-center text-[11px] font-medium uppercase tracking-wide text-slate-400">
-                      {formatDayHeading(message.sentAt, interval.timezone)}
+                      {formatDayHeading(message.sentAt, interval.timezone, dateFormat)}
                     </p>
                   ) : null}
                   <MessageBubble message={message} timeZone={interval.timezone} />

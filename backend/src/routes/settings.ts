@@ -1,5 +1,6 @@
 import type { FastifyInstance } from "fastify";
 import {
+  DefaultDateFormatSettings,
   DefaultTimezoneSettings,
   ProviderConfigPublic,
   ProviderConfigUpdate,
@@ -87,5 +88,18 @@ export function registerSettingsRoutes(
     const body = DefaultTimezoneSettings.parse(request.body);
     const timezone = await store.setDefaultTimezone(body.timezone);
     return DefaultTimezoneSettings.parse({ timezone });
+  });
+
+  /** Global display date format for generic dashboard timestamps. */
+  app.get("/api/settings/default-date-format", async () =>
+    DefaultDateFormatSettings.parse({
+      dateFormat: await store.getDefaultDateFormat(),
+    }),
+  );
+
+  app.put("/api/settings/default-date-format", async (request) => {
+    const body = DefaultDateFormatSettings.parse(request.body);
+    const dateFormat = await store.setDefaultDateFormat(body.dateFormat);
+    return DefaultDateFormatSettings.parse({ dateFormat });
   });
 }

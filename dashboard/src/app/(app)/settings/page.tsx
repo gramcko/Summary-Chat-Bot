@@ -1,5 +1,6 @@
 "use client";
 
+import { DefaultDateFormatForm } from "@/components/settings/DefaultDateFormatForm";
 import { DefaultTimezoneForm } from "@/components/settings/DefaultTimezoneForm";
 import { ProviderForm } from "@/components/settings/ProviderForm";
 import { Button } from "@/components/ui/Button";
@@ -16,7 +17,7 @@ export default function SettingsPage() {
     <div className="space-y-6">
       <PageHeader
         title="Settings"
-        description="AI provider configuration for summary generation and the default time zone for new groups. Credentials are stored server-side and never shown again."
+        description="AI provider configuration for summary generation, plus the default time zone and date format for the dashboard. Credentials are stored server-side and never shown again."
         actions={
           <Button
             variant="secondary"
@@ -49,6 +50,8 @@ export default function SettingsPage() {
       ) : null}
 
       <DefaultTimezoneForm />
+
+      <DefaultDateFormatForm />
 
       <p className="text-xs leading-5 text-slate-500">
         WhatsApp session credentials are never available through the dashboard.

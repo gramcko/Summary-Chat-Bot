@@ -2,6 +2,7 @@
 
 import type { ApiMessage } from "@summarly/contracts";
 import { useEffect, useRef, useState, type FormEvent } from "react";
+import { useAppDateFormat } from "@/components/TimeZoneProvider";
 import { Alert } from "@/components/ui/Alert";
 import { Button } from "@/components/ui/Button";
 import { TextField } from "@/components/ui/Field";
@@ -35,6 +36,7 @@ export function MessagesTab({
   groupId: string;
   timeZone: string;
 }) {
+  const dateFormat = useAppDateFormat();
   const [initialRange] = useState<MessageRangeInput>(() =>
     defaultMessageRange(timeZone),
   );
@@ -252,13 +254,13 @@ export function MessagesTab({
               const previous = ordered[index - 1];
               const showDay =
                 previous === undefined ||
-                formatDayHeading(previous.sentAt, timeZone) !==
-                  formatDayHeading(message.sentAt, timeZone);
+                formatDayHeading(previous.sentAt, timeZone, dateFormat) !==
+                  formatDayHeading(message.sentAt, timeZone, dateFormat);
               return (
                 <li key={message.id}>
                   {showDay ? (
                     <p className="mb-3 text-center text-[11px] font-medium uppercase tracking-wide text-slate-400">
-                      {formatDayHeading(message.sentAt, timeZone)}
+                      {formatDayHeading(message.sentAt, timeZone, dateFormat)}
                     </p>
                   ) : null}
                   <MessageBubble message={message} timeZone={timeZone} />

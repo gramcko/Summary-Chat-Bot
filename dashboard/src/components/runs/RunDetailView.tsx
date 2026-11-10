@@ -5,7 +5,7 @@ import Link from "next/link";
 import { useEffect, useState, type ReactNode } from "react";
 import { SummaryView } from "@/components/SummaryView";
 import { RunMessagesTab } from "@/components/runs/RunMessagesTab";
-import { useAppTimeZone } from "@/components/TimeZoneProvider";
+import { useAppDateFormat, useAppTimeZone } from "@/components/TimeZoneProvider";
 import { Alert } from "@/components/ui/Alert";
 import { RunStatusBadge, runStatusHint } from "@/components/ui/Badges";
 import { Button, ButtonLink } from "@/components/ui/Button";
@@ -48,6 +48,7 @@ const RUN_TABS: readonly TabDefinition[] = [
 export function RunDetailView({ runId }: { runId: string }) {
   const [tab, setTab] = useState<string>("summary");
   const timeZone = useAppTimeZone();
+  const dateFormat = useAppDateFormat();
   const run = useResource(() => api.run(runId), [runId]);
   const groups = useResource(() => api.groups(), []);
   const current = run.data;
@@ -129,7 +130,7 @@ export function RunDetailView({ runId }: { runId: string }) {
         title={`Summary run ${shortId(current.id)}`}
         description={
           <>
-            Requested {formatDateTime(current.createdAt, timeZone)} ·{" "}
+            Requested {formatDateTime(current.createdAt, timeZone, dateFormat)} ·{" "}
             {current.kind === "manual" ? "manual request" : "scheduled"}{" "}
             {polling ? "· refreshing automatically" : null}
           </>
@@ -175,7 +176,7 @@ export function RunDetailView({ runId }: { runId: string }) {
               {current.kind === "manual" ? "Manual request" : "Scheduled"}
             </DetailItem>
             <DetailItem label="Interval">
-              {formatInterval(current.interval)}
+              {formatInterval(current.interval, dateFormat)}
             </DetailItem>
             <DetailItem label="Interval time zone">
               {current.interval.timezone}
@@ -183,7 +184,7 @@ export function RunDetailView({ runId }: { runId: string }) {
             <DetailItem label="Attempts">{current.attempts}</DetailItem>
             <DetailItem label="Run updated">
               <time dateTime={current.updatedAt}>
-                {formatDateTime(current.updatedAt, timeZone)}
+                {formatDateTime(current.updatedAt, timeZone, dateFormat)}
               </time>
             </DetailItem>
             <DetailItem label="Group messages updated">
@@ -191,7 +192,7 @@ export function RunDetailView({ runId }: { runId: string }) {
                 <span className="text-slate-500">No messages captured yet.</span>
               ) : (
                 <time dateTime={lastMessageAt}>
-                  {formatDateTime(lastMessageAt, timeZone)}
+                  {formatDateTime(lastMessageAt, timeZone, dateFormat)}
                 </time>
               )}
             </DetailItem>
@@ -268,6 +269,7 @@ export function RunDetailView({ runId }: { runId: string }) {
               <SummaryView
                 summary={summary.data}
                 timeZone={current.interval.timezone}
+                dateFormat={dateFormat}
               />
             )}
           </div>

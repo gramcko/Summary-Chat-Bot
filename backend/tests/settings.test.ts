@@ -113,6 +113,46 @@ describe("AI provider settings", () => {
   });
 });
 
+describe("default date format settings", () => {
+  it("defaults to DD/MM/YYYY and accepts a known format", async () => {
+    const { app, session } = await authedApp();
+    const initial = await app.inject({
+      method: "GET",
+      url: "/api/settings/default-date-format",
+      headers: { cookie: session },
+    });
+    expect(initial.statusCode).toBe(200);
+    expect(initial.json()).toEqual({ dateFormat: "DD/MM/YYYY" });
+
+    const put = await app.inject({
+      method: "PUT",
+      url: "/api/settings/default-date-format",
+      headers: { cookie: session },
+      payload: { dateFormat: "YYYY-MM-DD" },
+    });
+    expect(put.statusCode).toBe(200);
+    expect(put.json()).toEqual({ dateFormat: "YYYY-MM-DD" });
+
+    const updated = await app.inject({
+      method: "GET",
+      url: "/api/settings/default-date-format",
+      headers: { cookie: session },
+    });
+    expect(updated.json()).toEqual({ dateFormat: "YYYY-MM-DD" });
+  });
+
+  it("rejects an unknown format", async () => {
+    const { app, session } = await authedApp();
+    const res = await app.inject({
+      method: "PUT",
+      url: "/api/settings/default-date-format",
+      headers: { cookie: session },
+      payload: { dateFormat: "DD-MM-YY" },
+    });
+    expect(res.statusCode).toBe(400);
+  });
+});
+
 describe("default time zone settings", () => {
   it("defaults to UTC and accepts a valid IANA zone", async () => {
     const { app, session } = await authedApp();

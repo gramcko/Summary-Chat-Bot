@@ -17,6 +17,8 @@ Redis/BullMQ, and a Next.js dashboard.
   unmonitored; the admin opts each one in.
 - **Daily and manual summaries** — scheduled or on-demand, per group, with
   IANA time zones and half-open intervals.
+- **Complete group capture** — every message in a monitored group, including
+  the linked account's own messages, is captured for summarization.
 - **Custom summary instructions** — per-run guidance sent as a separate,
   labelled channel to the AI provider.
 - **Group detail** — summaries, member roster, chat history, and settings.
@@ -33,6 +35,8 @@ Redis/BullMQ, and a Next.js dashboard.
   monitored group (WhatsApp decides what history is available).
 - **Default time zone setting** — used for new groups, as the initial value
   in the summary request form, and for generic dashboard timestamps.
+- **Default date format setting** — choose DD/MM/YYYY, MM/DD/YYYY,
+  YYYY-MM-DD, or DD MMM YYYY for dates across the dashboard.
 - **AI provider settings** — Google Gemini or the deterministic mock provider;
   saved API keys are encrypted server-side and never returned to the browser.
 
@@ -143,8 +147,8 @@ All variables live in the repository-root `.env` (ignored by Git). See
 | `SCHEDULER_ENABLED`, `SCHEDULER_INTERVAL_MS`, `DEFAULT_SUMMARY_TIME` | Daily scheduler |
 | `HISTORY_IMPORT_*` | Bounded history-import budgets |
 
-The **AI provider** and the **default time zone** are configured in the
-dashboard's **Settings** page.
+The **AI provider**, the **default time zone**, and the **default date format**
+are configured in the dashboard's **Settings** page.
 
 ## Database migrations
 

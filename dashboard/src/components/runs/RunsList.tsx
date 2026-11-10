@@ -3,7 +3,7 @@
 import type { Group, SummaryRun } from "@summarly/contracts";
 import Link from "next/link";
 import { useState } from "react";
-import { useAppTimeZone } from "@/components/TimeZoneProvider";
+import { useAppDateFormat, useAppTimeZone } from "@/components/TimeZoneProvider";
 import { Alert } from "@/components/ui/Alert";
 import { Badge, RunStatusBadge } from "@/components/ui/Badges";
 import { Button, ButtonLink } from "@/components/ui/Button";
@@ -21,6 +21,7 @@ interface RunRowProps {
 
 function RunRow({ run, groups, onUpdated }: RunRowProps) {
   const timeZone = useAppTimeZone();
+  const dateFormat = useAppDateFormat();
   const [retrying, setRetrying] = useState(false);
   const [retryError, setRetryError] = useState<ApiError | null>(null);
 
@@ -56,10 +57,10 @@ function RunRow({ run, groups, onUpdated }: RunRowProps) {
           )}
         </div>
         <p className="mt-1 text-xs text-slate-600">
-          {formatInterval(run.interval)}
+          {formatInterval(run.interval, dateFormat)}
         </p>
         <p className="mt-1 text-xs text-slate-500">
-          Requested {formatDateTime(run.createdAt, timeZone)} · {run.attempts}{" "}
+          Requested {formatDateTime(run.createdAt, timeZone, dateFormat)} · {run.attempts}{" "}
           {pluralize(run.attempts, "attempt")}
         </p>
         {run.error === null ? null : (

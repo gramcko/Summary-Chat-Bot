@@ -15,7 +15,6 @@ import type { RawInboundMessage } from "./whatsapp/adapter.js";
  *   "other" even when the caption contains URLs.
  *
  * SKIP (counted, never persisted):
- * - own messages (fromMe)
  * - status broadcasts (status@broadcast)
  * - reactions
  * - protocol messages, which is how WhatsApp delivers message edits and
@@ -27,10 +26,14 @@ import type { RawInboundMessage } from "./whatsapp/adapter.js";
  *   usable timestamp
  * - non-group chats (DMs) — defense in depth behind the adapter's
  *   shouldIgnoreJid filter; only `@g.us` group chats are ever captured.
+ *
+ * Own messages (`fromMe`) in a group ARE captured: the linked account is
+ * the administrator's own WhatsApp, so their contributions are part of the
+ * conversation being summarized. Non-group own traffic (DMs, self-chat,
+ * status) is still skipped by the rules above.
  */
 
 export type SkipReason =
-  | "own-message"
   | "not-group"
   | "status-broadcast"
   | "reaction"
@@ -53,6 +56,8 @@ export interface NewMessage {
   sentAt: Date;
   body: string;
   messageType: MessageType;
+  /** True when the linked account sent the message (its own group messages). */
+  fromMe: boolean;
 }
 
 export type NormalizeResult =
@@ -61,7 +66,6 @@ export type NormalizeResult =
 
 /** All skip reasons, for counted summaries. */
 export const SKIP_REASONS: readonly SkipReason[] = [
-  "own-message",
   "not-group",
   "status-broadcast",
   "reaction",
@@ -90,7 +94,6 @@ export function isUrlOnly(text: string): boolean {
  * then content.
  */
 export function normalizeMessage(raw: RawInboundMessage): NormalizeResult {
-  if (raw.fromMe) return { action: "skip", reason: "own-message" };
   if (raw.chatJid === "status@broadcast") {
     return { action: "skip", reason: "status-broadcast" };
   }
@@ -124,6 +127,7 @@ export function normalizeMessage(raw: RawInboundMessage): NormalizeResult {
     senderJid: raw.senderJid,
     senderName,
     sentAt,
+    fromMe: raw.fromMe,
   };
 
   if (raw.kind === "other") {

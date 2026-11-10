@@ -10,6 +10,7 @@ import {
   type ContactDetail,
   type ContactMessage,
   type ContactSummary,
+  type DateFormat,
   type GroupMember,
 } from "@summarly/contracts";
 import { decryptSecret, encryptSecret } from "./crypto.js";
@@ -761,6 +762,25 @@ export class PostgresStore implements Store {
       [timezone],
     );
     return timezone;
+  }
+
+  async getDefaultDateFormat(): Promise<DateFormat> {
+    const result = await this.pool.query<{ default_date_format: DateFormat }>(
+      "SELECT default_date_format FROM app_settings WHERE id = 1",
+    );
+    return result.rows[0]?.default_date_format ?? "DD/MM/YYYY";
+  }
+
+  async setDefaultDateFormat(dateFormat: DateFormat): Promise<DateFormat> {
+    await this.pool.query(
+      `INSERT INTO app_settings (id, default_date_format, updated_at)
+       VALUES (1, $1, now())
+       ON CONFLICT (id) DO UPDATE SET
+         default_date_format = EXCLUDED.default_date_format,
+         updated_at = now()`,
+      [dateFormat],
+    );
+    return dateFormat;
   }
 
   // ---- WhatsApp connection status ----

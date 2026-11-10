@@ -7,6 +7,7 @@ import type {
   CreateAdminRequest,
   CreateAdminResponse,
   CreateRunRequest,
+  DefaultDateFormatSettings,
   DefaultTimezoneSettings,
   ErrorCode,
   ErrorDetail,
@@ -507,5 +508,21 @@ export const api = {
       method: "PUT",
       body,
     }).then((result) => result.data);
+  },
+
+  /** Global display date format for generic dashboard timestamps. */
+  defaultDateFormat(): Promise<DefaultDateFormatSettings> {
+    return requestRaw<DefaultDateFormatSettings>(
+      "/settings/default-date-format",
+    ).then((result) => result.data);
+  },
+
+  updateDefaultDateFormat(
+    body: DefaultDateFormatSettings,
+  ): Promise<DefaultDateFormatSettings> {
+    return requestRaw<DefaultDateFormatSettings>(
+      "/settings/default-date-format",
+      { method: "PUT", body },
+    ).then((result) => result.data);
   },
 };

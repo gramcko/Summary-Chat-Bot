@@ -366,7 +366,6 @@ describe("message capture filters", () => {
     });
 
     h.adapter.emitMessages(
-      rawMessage({ messageId: "S1", chatJid: GROUP_A, fromMe: true }),
       rawMessage({ messageId: "S2", chatJid: GROUP_A, kind: "reaction" }),
       rawMessage({ messageId: "S3", chatJid: GROUP_A, kind: "protocol" }),
       rawMessage({ messageId: "S4", chatJid: GROUP_A, kind: "system" }),
@@ -381,8 +380,7 @@ describe("message capture filters", () => {
     const skipped = findEvents(h.logs, "messages_skipped");
     expect(skipped).toHaveLength(1);
     expect(skipped[0]?.fields).toMatchObject({
-      total: 7,
-      "own-message": 1,
+      total: 6,
       reaction: 1,
       protocol: 1,
       system: 1,
@@ -390,6 +388,33 @@ describe("message capture filters", () => {
       "status-broadcast": 1,
       "not-group": 1,
     });
+    await h.service.stop();
+  });
+
+  it("captures the linked account's own group messages", async () => {
+    const h = harness();
+    await h.service.start();
+    h.db.groups.set(GROUP_A, {
+      id: "g-a",
+      name: "A",
+      monitored: true,
+      timezone: "UTC",
+      summaryTime: null,
+    });
+
+    h.adapter.emitMessages(
+      rawMessage({
+        messageId: "OWN1",
+        chatJid: GROUP_A,
+        fromMe: true,
+        text: "my own update",
+      }),
+    );
+    await h.service.idle();
+
+    expect(h.db.messages).toHaveLength(1);
+    expect(h.db.messages[0]?.fromMe).toBe(true);
+    expect(h.db.messages[0]?.body).toBe("my own update");
     await h.service.stop();
   });
 

@@ -137,7 +137,8 @@ actions raise in-app toast notifications.
 - `/contacts/[id]` — contact detail with monitored groups, cross-group messages
   (tagged with the group), and an **Edit name** override.
 - `/runs` — request a manual summary (type-to-filter group picker that starts
-  empty, optional custom instructions, 0–2000 characters with a counter) and
+  empty, separate date and time pickers for the start/end of the half-open
+  period, optional custom instructions, 0–2000 characters with a counter) and
   browse run history. Opening it from a group (`/runs?group=<id>`) preselects
   that group. Selecting a group prefills the time zone and a 24-hour window
   ending one minute after the group's newest captured message, so the request
@@ -145,8 +146,9 @@ actions raise in-app toast notifications.
 - `/runs/[id]` — run status, retry, custom instructions, and tabs for the
   generated **Summary** and the **Messages used** (the run's half-open
   interval).
-- `/settings` — AI provider configuration (the API key is write-only) and the
-  global **Default time zone** used for new groups and the summary form.
+- `/settings` — AI provider configuration (the API key is write-only), the
+  global **Default time zone** used for new groups and the summary form, and
+  the **Default date format** used for dashboard dates.
 
 ## Notes
 
@@ -163,8 +165,9 @@ actions raise in-app toast notifications.
   zone). Server-side `error.details[].path` entries are mapped back onto the
   matching form fields.
 - Generic UI timestamps (connection, runs, contacts, roster updates) use the
-  **Settings → Default time zone** value. Group-specific views (chat history,
-  run source messages, summary source refs) use the group/run time zone.
+  **Settings → Default time zone** value and the **Settings → Default date
+  format** pattern. Group-specific views (chat history, run source messages,
+  summary source refs) use the group/run time zone but the same date format.
 - `src/lib/api.ts` exposes `setBrowserLocationForTests`, a narrow test seam that
   lets `tests/api.test.ts` cover the `401 → /login` rule without a DOM. It is
   only used by tests; passing `null` restores the real `window.location`.

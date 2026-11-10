@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import {
   defaultRunWindow,
+  formatDate,
   formatDateTime,
   formatInterval,
   instantToWallTimeInZone,
@@ -90,6 +91,30 @@ test("falls back to the default window for an unusable timestamp", () => {
   assert.ok(start instanceof Date);
   assert.ok(end instanceof Date);
   assert.equal(end.getTime() - start.getTime(), 24 * 60 * 60 * 1000);
+});
+
+test("formats dates in each configured pattern", () => {
+  const iso = "2026-11-02T21:50:42.000Z";
+  assert.equal(formatDate(iso, "UTC", "DD/MM/YYYY"), "02/11/2026");
+  assert.equal(formatDate(iso, "UTC", "MM/DD/YYYY"), "11/02/2026");
+  assert.equal(formatDate(iso, "UTC", "YYYY-MM-DD"), "2026-11-02");
+  assert.equal(formatDate(iso, "UTC", "DD MMM YYYY"), "02 Nov 2026");
+});
+
+test("formats dates in the chosen zone, not the browser zone", () => {
+  // 21:50Z is still 2 Nov in UTC, but 3 Nov in Tokyo.
+  const iso = "2026-11-02T21:50:42.000Z";
+  assert.equal(formatDate(iso, "UTC", "YYYY-MM-DD"), "2026-11-02");
+  assert.equal(formatDate(iso, "Asia/Tokyo", "YYYY-MM-DD"), "2026-11-03");
+});
+
+test("formatDateTime combines the chosen date format with the zone time", () => {
+  const formatted = formatDateTime(
+    "2026-11-02T21:50:42.000Z",
+    "Europe/Madrid",
+    "DD/MM/YYYY",
+  );
+  assert.ok(formatted.startsWith("02/11/2026, "));
 });
 
 test("formats intervals in the run time zone", () => {

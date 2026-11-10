@@ -55,6 +55,7 @@ function newMessage(overrides: Partial<NewMessage> = {}): NewMessage {
     sentAt: new Date("2026-11-01T10:00:00Z"),
     body: "hello",
     messageType: "text",
+    fromMe: false,
     ...overrides,
   };
 }

@@ -43,6 +43,12 @@ interface SubmitResult {
   created: boolean;
 }
 
+/** Splits a `YYYY-MM-DDTHH:mm` wall time into its date and time parts. */
+function splitWallTime(value: string): { date: string; time: string } {
+  const [date = "", time = ""] = value.split("T");
+  return { date, time };
+}
+
 export function RequestRunForm({
   groups,
   defaultTimezone,
@@ -52,8 +58,10 @@ export function RequestRunForm({
   const { notify } = useNotifications();
   const [groupId, setGroupId] = useState(initialGroupId ?? "");
   const [timezone, setTimezone] = useState(defaultTimezone);
-  const [start, setStart] = useState("");
-  const [end, setEnd] = useState("");
+  const [startDate, setStartDate] = useState("");
+  const [startTime, setStartTime] = useState("");
+  const [endDate, setEndDate] = useState("");
+  const [endTime, setEndTime] = useState("");
   const [instructions, setInstructions] = useState("");
   const [fieldErrors, setFieldErrors] = useState<FieldErrors>({});
   const [failure, setFailure] = useState<ApiError | null>(null);
@@ -66,6 +74,9 @@ export function RequestRunForm({
   const prefillToken = useRef(0);
 
   const selectedGroupId = groupId;
+  const start =
+    startDate !== "" && startTime !== "" ? `${startDate}T${startTime}` : "";
+  const end = endDate !== "" && endTime !== "" ? `${endDate}T${endTime}` : "";
 
   // Prefill the time zone and window when the selected group changes. The
   // window starts as the rolling default day, then moves to cover the group's
@@ -78,8 +89,12 @@ export function RequestRunForm({
     lastPrefilledGroup.current = group.id;
     setTimezone(group.timezone);
     const fallback = defaultRunWindow(group.timezone);
-    setStart(fallback.start);
-    setEnd(fallback.end);
+    const fallbackStart = splitWallTime(fallback.start);
+    const fallbackEnd = splitWallTime(fallback.end);
+    setStartDate(fallbackStart.date);
+    setStartTime(fallbackStart.time);
+    setEndDate(fallbackEnd.date);
+    setEndTime(fallbackEnd.time);
     setResult(null);
 
     const token = ++prefillToken.current;
@@ -91,8 +106,12 @@ export function RequestRunForm({
         const newest = page.items[0]?.sentAt;
         if (newest === undefined) return;
         const window = runWindowAroundLatest(newest, group.timezone);
-        setStart(window.start);
-        setEnd(window.end);
+        const nextStart = splitWallTime(window.start);
+        const nextEnd = splitWallTime(window.end);
+        setStartDate(nextStart.date);
+        setStartTime(nextStart.time);
+        setEndDate(nextEnd.date);
+        setEndTime(nextEnd.time);
       })
       .catch(() => {
         // Keep the rolling default window; the user can still adjust it.
@@ -233,26 +252,64 @@ export function RequestRunForm({
           />
 
           <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
-            <TextField
-              id="run-start"
-              label="Start (inclusive)"
-              type="datetime-local"
-              value={start}
-              onChange={setStart}
-              required
-              error={fieldErrors.start}
-              disabled={submitting}
-            />
-            <TextField
-              id="run-end"
-              label="End (exclusive)"
-              type="datetime-local"
-              value={end}
-              onChange={setEnd}
-              required
-              error={fieldErrors.end}
-              disabled={submitting}
-            />
+            <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+              <TextField
+                id="run-start-date"
+                label="Start date"
+                type="date"
+                value={startDate}
+                onChange={(value) => {
+                  setStartDate(value);
+                  setResult(null);
+                  setFieldErrors({});
+                }}
+                required
+                error={fieldErrors.start}
+                disabled={submitting || prefilling}
+              />
+              <TextField
+                id="run-start-time"
+                label="Start time"
+                type="time"
+                value={startTime}
+                onChange={(value) => {
+                  setStartTime(value);
+                  setResult(null);
+                  setFieldErrors({});
+                }}
+                required
+                disabled={submitting || prefilling}
+              />
+            </div>
+            <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+              <TextField
+                id="run-end-date"
+                label="End date"
+                type="date"
+                value={endDate}
+                onChange={(value) => {
+                  setEndDate(value);
+                  setResult(null);
+                  setFieldErrors({});
+                }}
+                required
+                error={fieldErrors.end}
+                disabled={submitting || prefilling}
+              />
+              <TextField
+                id="run-end-time"
+                label="End time"
+                type="time"
+                value={endTime}
+                onChange={(value) => {
+                  setEndTime(value);
+                  setResult(null);
+                  setFieldErrors({});
+                }}
+                required
+                disabled={submitting || prefilling}
+              />
+            </div>
           </div>
 
           <TextAreaField

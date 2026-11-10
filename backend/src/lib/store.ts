@@ -7,6 +7,7 @@ import {
   type ContactDetail,
   type ContactMessage,
   type ContactSummary,
+  type DateFormat,
   type Group,
   type GroupMember,
   type GroupSummary,
@@ -305,6 +306,9 @@ export interface Store {
   /** IANA zone used for new groups and the summary form's initial value. */
   getDefaultTimezone(): Promise<string>;
   setDefaultTimezone(timezone: string): Promise<string>;
+  /** Display date format for generic dashboard timestamps. */
+  getDefaultDateFormat(): Promise<DateFormat>;
+  setDefaultDateFormat(dateFormat: DateFormat): Promise<DateFormat>;
 
   // ---- WhatsApp connection status (non-secret) ----
   getConnectionStatus(): Promise<ConnectionStatus>;
@@ -358,6 +362,7 @@ export class InMemoryStore implements Store {
   private readonly summariesByRunId = new Map<string, string>();
   private provider: ProviderRecord | null = null;
   private defaultTimezone = "UTC";
+  private defaultDateFormat: DateFormat = "DD/MM/YYYY";
   private connection: ConnectionStatus = {
     state: "unavailable",
     since: nowIso(),
@@ -907,6 +912,15 @@ export class InMemoryStore implements Store {
   async setDefaultTimezone(timezone: string): Promise<string> {
     this.defaultTimezone = timezone;
     return timezone;
+  }
+
+  async getDefaultDateFormat(): Promise<DateFormat> {
+    return this.defaultDateFormat;
+  }
+
+  async setDefaultDateFormat(dateFormat: DateFormat): Promise<DateFormat> {
+    this.defaultDateFormat = dateFormat;
+    return dateFormat;
   }
 
   async getConnectionStatus(): Promise<ConnectionStatus> {

@@ -6,8 +6,8 @@ import { rawMessage } from "./fakes.js";
  * Normalization policy tests (ADR 0004). These encode the documented
  * capture/skip rules: text and links are captured, other content types
  * become "other" rows with the caption or an empty body, and the skip
- * list (own messages, status broadcasts, reactions, protocol/system
- * notices, unusable identity) is never persisted.
+ * list (status broadcasts, reactions, protocol/system notices, unusable
+ * identity) is never persisted. Own group messages are captured.
  */
 
 const GROUP = "111111111111-22222222@g.us";
@@ -114,11 +114,22 @@ describe("normalizeMessage: capture rules", () => {
 });
 
 describe("normalizeMessage: skip rules (never persisted)", () => {
-  it("skips own messages", () => {
-    expect(normalizeMessage(rawMessage({ fromMe: true }))).toEqual({
-      action: "skip",
-      reason: "own-message",
-    });
+  it("captures own group messages and keeps their origin", () => {
+    const result = normalizeMessage(
+      rawMessage({ fromMe: true, text: "my own update" }),
+    );
+    expect(result.action).toBe("capture");
+    if (result.action !== "capture") throw new Error("unreachable");
+    expect(result.row.fromMe).toBe(true);
+    expect(result.row.body).toBe("my own update");
+  });
+
+  it("skips own direct messages as non-group", () => {
+    expect(
+      normalizeMessage(
+        rawMessage({ fromMe: true, chatJid: "34600111222@s.whatsapp.net" }),
+      ),
+    ).toEqual({ action: "skip", reason: "not-group" });
   });
 
   it("skips status broadcasts", () => {

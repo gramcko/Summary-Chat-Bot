@@ -1,6 +1,6 @@
 "use client";
 
-import { useAppTimeZone } from "@/components/TimeZoneProvider";
+import { useAppDateFormat, useAppTimeZone } from "@/components/TimeZoneProvider";
 import { ButtonLink } from "@/components/ui/Button";
 import { EmptyState, ErrorState } from "@/components/ui/States";
 import { SkeletonCard } from "@/components/ui/Skeleton";
@@ -15,6 +15,7 @@ import { formatDateTime, formatInterval } from "@/lib/time";
  */
 export function SummariesTab({ groupId }: { groupId: string }) {
   const timeZone = useAppTimeZone();
+  const dateFormat = useAppDateFormat();
   const summaries = useResource(() => api.groupSummaries(groupId), [groupId]);
   const { data, error, loading, reload } = summaries;
 
@@ -68,11 +69,11 @@ export function SummariesTab({ groupId }: { groupId: string }) {
             <div className="flex flex-wrap items-start justify-between gap-3">
               <div className="min-w-0">
                 <p className="text-sm font-semibold text-slate-900">
-                  {formatInterval(summary.interval)}
+                  {formatInterval(summary.interval, dateFormat)}
                 </p>
                 <p className="mt-1 text-xs text-slate-500">
                   {summary.provider} · {summary.model} · generated{" "}
-                  {formatDateTime(summary.createdAt, timeZone)}
+                  {formatDateTime(summary.createdAt, timeZone, dateFormat)}
                 </p>
               </div>
               <ButtonLink
