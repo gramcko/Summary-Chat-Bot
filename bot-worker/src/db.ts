@@ -126,6 +126,8 @@ export interface BotDb {
   setConnectionState(connectionId: string, state: ConnectionState): Promise<void>;
   /** Subset of `chatJids` whose group row exists and is monitored. */
   filterMonitoredChatIds(chatJids: string[]): Promise<Set<string>>;
+  /** Every monitored group chat JID (initial history capture set). */
+  listMonitoredChatIds(): Promise<string[]>;
   /** Idempotent batch insert; returns inserted vs already-captured counts. */
   insertMessages(
     connectionId: string,
@@ -326,6 +328,13 @@ export class PostgresBotDb implements BotDb {
       [chatJids],
     );
     return new Set(result.rows.map((row) => row.chat_id));
+  }
+
+  async listMonitoredChatIds(): Promise<string[]> {
+    const result = await this.pool.query<ChatIdRow>(
+      "SELECT chat_id FROM groups WHERE monitored = true AND chat_id IS NOT NULL",
+    );
+    return result.rows.map((row) => row.chat_id);
   }
 
   async insertMessages(

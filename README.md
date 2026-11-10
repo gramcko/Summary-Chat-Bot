@@ -143,6 +143,7 @@ All variables live in the repository-root `.env` (ignored by Git). See
 | `SUPERVISE_WORKERS` | `true` (default) lets the backend spawn/supervise workers |
 | `WA_SESSION_DIR` | Protected Baileys session directory (default `./wa-session`) |
 | `WA_PHONE_NUMBER` | Optional; use pairing-code linking instead of QR |
+| `WA_HISTORY_SYNC` | `off` (default), `recent`, or `full` connect-time history policy |
 | `DEFAULT_GROUP_TIMEZONE` | Fallback IANA zone for new groups |
 | `SCHEDULER_ENABLED`, `SCHEDULER_INTERVAL_MS`, `DEFAULT_SUMMARY_TIME` | Daily scheduler |
 | `HISTORY_IMPORT_*` | Bounded history-import budgets |
@@ -224,7 +225,10 @@ scripts/          Provider smoke test and e2e harness
 - **History import is best-effort.** On-demand history is served by the linked
   phone, so the phone must be online. WhatsApp may return less than requested,
   nothing, or several batches. A group with no captured messages has no anchor
-  for on-demand paging (`history_no_anchor`).
+  for on-demand paging (`history_no_anchor`). On-demand is unreliable on some
+  companion devices; `WA_HISTORY_SYNC=recent` (let the initial sync complete)
+  or `full` (opt-in capture of monitored groups' initial history, requires a
+  re-link) are the supported fallbacks.
 - **Group metadata carries only JIDs**, not names. Names come from saved
   contacts, message push names, or an admin override. LID-only members may show
   a phone number or “Unknown contact”.

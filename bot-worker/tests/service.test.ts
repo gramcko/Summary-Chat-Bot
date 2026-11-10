@@ -981,3 +981,38 @@ describe("sender names at ingestion (ADR 0008)", () => {
     await h.service.stop();
   });
 });
+
+describe("connect-time history (WA_HISTORY_SYNC=full)", () => {
+  it("persists initial history for monitored groups only", async () => {
+    const h = harness();
+    h.db.groups.set(GROUP_A, {
+      id: "g-a",
+      name: "A",
+      monitored: true,
+      timezone: "UTC",
+      summaryTime: null,
+    });
+    h.adapter.emitHistory(
+      GROUP_A,
+      [rawMessage({ messageId: "I1", chatJid: GROUP_A, text: "old" })],
+      { origin: "initial" },
+    );
+    await h.service.idle();
+
+    expect(h.db.messages.map((row) => row.whatsappMessageId)).toEqual(["I1"]);
+    // Historical traffic must not masquerade as live traffic.
+    expect(h.db.lastMessageTouches).toBe(0);
+  });
+
+  it("drops initial history for an unmonitored group", async () => {
+    const h = harness();
+    h.adapter.emitHistory(
+      GROUP_A,
+      [rawMessage({ messageId: "I2", chatJid: GROUP_A, text: "old" })],
+      { origin: "initial" },
+    );
+    await h.service.idle();
+
+    expect(h.db.messages).toHaveLength(0);
+  });
+});

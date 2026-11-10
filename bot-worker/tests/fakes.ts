@@ -54,6 +54,8 @@ export class FakeAdapter implements WhatsAppAdapter {
   onRequestHistory?: (request: HistoryFetchRequest) => void;
   /** Chats released via releaseHistoryChat(). */
   releasedHistoryChats: string[] = [];
+  /** Last monitored set passed to setHistoryCaptureChats(). */
+  historyCaptureChats: ReadonlySet<string> = new Set();
   /** Rosters returned by fetchRoster(); may be mutated between calls. */
   rosterResults = new Map<string, GroupMemberInfo[]>();
   rosterError: Error | null = null;
@@ -123,6 +125,10 @@ export class FakeAdapter implements WhatsAppAdapter {
     this.releasedHistoryChats.push(chatJid);
   }
 
+  setHistoryCaptureChats(chatJids: ReadonlySet<string>): void {
+    this.historyCaptureChats = new Set(chatJids);
+  }
+
   subscribe(handler: (event: AdapterEvent) => void): () => void {
     this.handlers.add(handler);
     return () => {
@@ -143,12 +149,17 @@ export class FakeAdapter implements WhatsAppAdapter {
   emitHistory(
     chatJid: string,
     messages: RawInboundMessage[],
-    extra: { progress?: number | null; requestId?: string | null } = {},
+    extra: {
+      progress?: number | null;
+      requestId?: string | null;
+      origin?: "initial" | "on-demand";
+    } = {},
   ): void {
     this.emit({
       type: "history",
       chatJid,
       messages,
+      origin: extra.origin ?? "on-demand",
       progress: extra.progress ?? null,
       requestId: extra.requestId ?? null,
     });
@@ -237,6 +248,12 @@ export class FakeDb implements BotDb {
     return new Set(
       chatJids.filter((chatJid) => this.groups.get(chatJid)?.monitored === true),
     );
+  }
+
+  async listMonitoredChatIds(): Promise<string[]> {
+    return [...this.groups.entries()]
+      .filter(([, group]) => group.monitored)
+      .map(([chatJid]) => chatJid);
   }
 
   async insertMessages(

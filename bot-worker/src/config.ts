@@ -14,6 +14,7 @@ import {
   validateHistoryImportBudgets,
 } from "./history-import.js";
 import { isLogLevel, type LogLevel } from "./lib/log.js";
+import type { HistorySyncMode } from "./whatsapp/adapter.js";
 
 /**
  * Configuration for the bot-worker service (architecture §4.3, ADR
@@ -77,6 +78,12 @@ export interface BotConfig {
   linkingDisplay: "tty" | "none";
   /** History-import budget knobs (ADR 0007); bounded best-effort. */
   historyImport: HistoryImportSettings;
+  /**
+   * Connect-time history policy (WA_HISTORY_SYNC): "off" (privacy-first,
+   * default), "recent" (let the initial sync complete but drop it), or
+   * "full" (capture initial/full history for monitored groups).
+   */
+  historySyncMode: HistorySyncMode;
   /**
    * Session-control poll interval (SESSION_CONTROL_POLL_MS, default
    * 3000, floor 1000): how often the admin logout flag is checked.
@@ -289,6 +296,18 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): BotConfig {
     );
   }
 
+  const rawHistorySync = env["WA_HISTORY_SYNC"]?.trim() || "off";
+  if (
+    rawHistorySync !== "off" &&
+    rawHistorySync !== "recent" &&
+    rawHistorySync !== "full"
+  ) {
+    throw new ConfigError(
+      `WA_HISTORY_SYNC "${rawHistorySync}" is not valid (expected "off", "recent", or "full").`,
+    );
+  }
+  const historySyncMode: HistorySyncMode = rawHistorySync;
+
   // ---- Session control (ADR 0008): admin logout flag polling ----
   let sessionControlPollMs = parseBudgetInt(
     env,
@@ -308,6 +327,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): BotConfig {
     checkForUpdates,
     linkingDisplay,
     historyImport,
+    historySyncMode,
     sessionControlPollMs,
     logLevel,
     backoff: DEFAULT_BACKOFF,

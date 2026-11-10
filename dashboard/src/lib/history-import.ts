@@ -84,7 +84,7 @@ function importedMessages(count: number): string {
 /** Friendly detail text for the safe error codes the worker stores. */
 const IMPORT_ERROR_TEXT: Record<string, string> = {
   history_timeout:
-    "No response from the linked phone. Keep WhatsApp online on the phone and retry. If the group has no older history, there may be nothing left to import.",
+    "No response from the linked phone. Keep WhatsApp online and retry. Some linked devices do not answer on-demand history; if this keeps failing, enable WA_HISTORY_SYNC=recent or full on the bot-worker and re-link the WhatsApp session.",
   history_unavailable: "WhatsApp could not provide history for this chat.",
   history_no_anchor:
     "There are no captured messages to page back from yet. Wait for a live message in this group, then retry.",

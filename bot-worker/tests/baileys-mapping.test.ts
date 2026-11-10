@@ -7,6 +7,7 @@ import {
   historyFailureFromResponseCode,
   isIgnoredIncomingJid,
   mapGroupParticipants,
+  mapHistoryResponse,
   mapHistoryResponseFailure,
   mapHistorySet,
   mapWAMessage,
@@ -432,6 +433,16 @@ describe("mapHistorySet (messaging-history.set translation, ADR 0007)", () => {
     expect(events[0]?.messages[0]?.kind).toBe("text");
     expect(events[0]?.progress).toBe(0.5);
     expect(events[0]?.requestId).toBe("req-1");
+    expect(events[0]?.origin).toBe("on-demand");
+  });
+
+  it("marks connect-time history as origin 'initial'", () => {
+    const events = mapHistorySet(
+      { messages: [historyMessage(A, "M1")] },
+      new Set([A]),
+      "initial",
+    );
+    expect(events[0]?.origin).toBe("initial");
   });
 
   it("drops other chats' history BEFORE normalization (privacy)", () => {
@@ -541,6 +552,17 @@ describe("history failure response codes (on-demand PDO)", () => {
     });
     expect(mapHistoryResponseFailure(success)).toBeNull();
     expect(mapHistoryResponseFailure(wa({}))).toBeNull();
+
+    expect(mapHistoryResponse(message)).toEqual({
+      requestId: "req-1",
+      kind: "failure",
+      reason: "history_phone_offline",
+    });
+    expect(mapHistoryResponse(success)).toEqual({
+      requestId: "req-2",
+      kind: "success",
+      reason: null,
+    });
   });
 });
 

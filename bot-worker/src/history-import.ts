@@ -43,6 +43,8 @@ export interface HistoryImportBudgets {
   roundTimeoutMs: number;
   /** Quiet period after the last received batch that ends a round. */
   roundSettleMs: number;
+  /** Grace after REQUEST_SUCCESS for a late history payload. */
+  successGraceMs: number;
   /** Poll interval for pending imports (floor 1000, enforced in config). */
   pollMs: number;
   /** Staleness threshold for crash recovery of 'running' claims. */
@@ -59,6 +61,7 @@ export const DEFAULT_HISTORY_IMPORT_BUDGETS: HistoryImportBudgets = {
   timeBudgetMs: 120_000,
   roundTimeoutMs: 30_000,
   roundSettleMs: 2_000,
+  successGraceMs: 5_000,
   pollMs: 5_000,
   staleMs: 600_000,
 };
@@ -141,6 +144,8 @@ export class HistoryImportService {
   private importBuffer: RawInboundMessage[] = [];
   /** Failure reported by the phone for the active request (if any). */
   private importFailure: HistoryFailureReason | null = null;
+  /** REQUEST_SUCCESS seen for the active request (no payload yet). */
+  private importSuccess = false;
   /** Bumps on every received history batch (settle tracking). */
   private activityVersion = 0;
   private wake: (() => void) | null = null;
@@ -208,6 +213,16 @@ export class HistoryImportService {
       // The phone explicitly refused/failed the request: stop waiting.
       if (this.importChat !== event.chatJid) return;
       this.importFailure = event.reason;
+      this.wakeNow();
+      return;
+    }
+    if (event.type === "history-success") {
+      // REQUEST_SUCCESS with no history payload yet: remember it so a
+      // round that ends empty finishes as `done` (no older history)
+      // instead of `history_timeout`. Wake to shorten the wait, but
+      // collectRoundBatch still gives the payload a short grace window.
+      if (this.importChat !== event.chatJid) return;
+      this.importSuccess = true;
       this.wakeNow();
       return;
     }
@@ -282,7 +297,20 @@ export class HistoryImportService {
       const remaining = deadline - this.now();
       if (remaining <= 0) return release();
       await this.waitForActivity(Math.min(firstBatchMs, remaining));
-      if (this.activityVersion === startVersion) return release(); // no answer
+      if (this.activityVersion === startVersion) {
+        // REQUEST_SUCCESS but no payload yet: give WhatsApp a short
+        // grace window to deliver the history notification (they can
+        // arrive as separate messages) before concluding "no history".
+        if (this.importSuccess) {
+          const graceRemaining = deadline - this.now();
+          if (graceRemaining > 0) {
+            await this.waitForActivity(
+              Math.min(this.budgets.successGraceMs, graceRemaining),
+            );
+          }
+        }
+        if (this.activityVersion === startVersion) return release(); // no answer
+      }
     }
     // Phase 2: settle — keep listening while batches keep arriving.
     for (;;) {
@@ -306,6 +334,7 @@ export class HistoryImportService {
     this.importChat = claim.chatJid;
     this.importBuffer = [];
     this.importFailure = null;
+    this.importSuccess = false;
     this.activityVersion = 0;
 
     const chatRef = safeChatRef(claim.chatJid);
@@ -368,6 +397,7 @@ export class HistoryImportService {
         // that arrive while the request is being relayed count as this
         // round's first response (CR-M1).
         this.importBuffer.length = 0;
+        this.importSuccess = false;
         const startVersion = this.activityVersion;
 
         try {
@@ -402,7 +432,15 @@ export class HistoryImportService {
           // WhatsApp answered with nothing: "history_timeout" when it
           // never answered at all, otherwise the available history is
           // simply exhausted (a successful partial import).
-          if (!gotAnyBatch) failure = "history_timeout";
+          if (this.importSuccess) {
+            this.log("debug", "history_no_older_messages", {
+              groupId: claim.groupId,
+              chatRef,
+              round: rounds,
+            });
+          } else if (!gotAnyBatch) {
+            failure = "history_timeout";
+          }
           break;
         }
         gotAnyBatch = true;

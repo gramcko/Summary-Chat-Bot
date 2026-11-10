@@ -125,6 +125,16 @@ export type HistoryFailureReason =
   | "history_expired"
   | "history_unavailable";
 
+/**
+ * How the socket treats WhatsApp's initial history sync (ADR 0007):
+ * - "off": only ON_DEMAND responses to our own requests (privacy-first).
+ * - "recent": allow the initial RECENT/INITIAL_BOOTSTRAP sync to complete
+ *   (required by WhatsApp's protocol state machine) but DROP the payload.
+ * - "full": also request/capture the initial/full history for monitored
+ *   groups (opt-in backfill; requires a re-link to trigger).
+ */
+export type HistorySyncMode = "off" | "recent" | "full";
+
 /** Participant-change actions (mirror of the WhatsApp event taxonomy). */
 export type ParticipantsAction =
   | "add"
@@ -203,6 +213,8 @@ export type AdapterEvent =
       type: "history";
       chatJid: string;
       messages: RawInboundMessage[];
+      /** "initial" is WhatsApp's connect-time sync; "on-demand" is a request. */
+      origin: "initial" | "on-demand";
       /** WhatsApp's batch progress hint (null when not provided). */
       progress: number | null;
       /** Peer-data request id when WhatsApp echoed one (correlation). */
@@ -217,7 +229,13 @@ export type AdapterEvent =
       type: "history-error";
       chatJid: string;
       reason: HistoryFailureReason;
-    };
+    }
+  /**
+   * The phone answered an on-demand request with REQUEST_SUCCESS but no
+   * history payload followed (the chat has no older history). The import
+   * finishes as `done` with 0 instead of a false `history_timeout`.
+   */
+  | { type: "history-success"; chatJid: string };
 
 /**
  * The WhatsApp integration as the rest of the service sees it.
@@ -245,6 +263,12 @@ export interface WhatsAppAdapter {
    * ("ignore stale history events", ADR 0007).
    */
   releaseHistoryChat(chatJid: string): void;
+  /**
+   * Sets the monitored chats eligible for the opt-in initial history
+   * capture (mode "full"). The service refreshes this set on start and
+   * after discovery; other chats' history is never parsed or stored.
+   */
+  setHistoryCaptureChats(chatJids: ReadonlySet<string>): void;
   /**
    * Full current roster for ONE chat (group metadata). Best-effort:
    * returns [] when the metadata is unavailable; callers must treat an

@@ -74,6 +74,7 @@ const adapter = new BaileysAdapter({
   sessionDir: config.sessionDir,
   phoneNumber: config.phoneNumber,
   checkForUpdates: config.checkForUpdates,
+  historySyncMode: config.historySyncMode,
   log,
 });
 

@@ -229,6 +229,15 @@ export class CaptureService {
   // ------------------------------------------------------------------
 
   private onEvent(event: AdapterEvent): void {
+    if (event.type === "history") {
+      // On-demand batches are consumed by HistoryImportService, which
+      // has its own subscription. Connect-time ("initial") batches are
+      // the opt-in full-history backfill: persist monitored groups only.
+      if (event.origin === "initial") {
+        this.enqueue(() => this.ingestInitialHistory(event));
+      }
+      return;
+    }
     if (event.type === "messages") {
       // Bounded queue (audit L4): on overflow the NEWEST messages are
       // dropped (already-queued work is older and closer to being
@@ -354,6 +363,7 @@ export class CaptureService {
     // was in flight — do not open a connection after shutdown.
     if (this.stopped || this.sessionLost) return;
     try {
+      await this.refreshHistoryCaptureChats();
       await this.adapter.connect();
     } catch (error) {
       this.log("error", "connect_failed", { reason: safeReason(error) });
@@ -440,6 +450,55 @@ export class CaptureService {
       if (!monitored.has(chat.chatJid)) continue;
       await this.syncRoster(chat.chatJid, chat.members);
     }
+    // Refresh the opt-in initial-history capture set (ADR 0007): only
+    // monitored groups are ever eligible.
+    await this.refreshHistoryCaptureChats();
+  }
+
+  /** Loads the monitored group set used by the full initial-sync mode. */
+  private async refreshHistoryCaptureChats(): Promise<void> {
+    try {
+      const chatJids = await this.db.listMonitoredChatIds();
+      this.adapter.setHistoryCaptureChats(new Set(chatJids));
+    } catch (error) {
+      this.log("warn", "history_capture_set_failed", {
+        reason: safeReason(error),
+      });
+    }
+  }
+
+  /**
+   * Persists a connect-time ("initial") history batch for monitored
+   * groups only (opt-in `WA_HISTORY_SYNC=full`, ADR 0007). It uses the
+   * same normalization and idempotent insert as live capture, but never
+   * touches `last_message_at` (historical traffic is not live traffic).
+   */
+  private async ingestInitialHistory(
+    event: Extract<AdapterEvent, { type: "history" }>,
+  ): Promise<void> {
+    if (event.messages.length === 0) return;
+    const rows: NewMessage[] = [];
+    for (const raw of event.messages) {
+      const result = normalizeMessage(raw);
+      if (result.action === "capture") rows.push(result.row);
+    }
+    if (rows.length === 0) return;
+    const chatJids = [...new Set(rows.map((row) => row.chatJid))];
+    const monitored = await this.db.filterMonitoredChatIds(chatJids);
+    const kept = rows.filter((row) => monitored.has(row.chatJid));
+    if (kept.length === 0) return;
+    const connectionId =
+      this.connectionId ?? (await this.db.ensureConnection());
+    const result = await this.db.insertMessages(connectionId, kept, {
+      touchLastMessage: false,
+    });
+    this.log("info", "history_initial_imported", {
+      chatRef: safeChatRef(event.chatJid),
+      received: event.messages.length,
+      captured: kept.length,
+      inserted: result.inserted,
+      duplicates: result.duplicates,
+    });
   }
 
   /** Upserts ONE chat's roster; empty rosters are "no data" (skipped). */

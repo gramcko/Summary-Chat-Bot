@@ -1,4 +1,5 @@
 import makeWASocket, {
+  Browsers,
   fetchLatestBaileysVersion,
   getContentType,
   makeCacheableSignalKeyStore,
@@ -23,6 +24,7 @@ import type {
   GroupMemberInfo,
   HistoryFailureReason,
   HistoryFetchRequest,
+  HistorySyncMode,
   ParticipantsAction,
   RawContentKind,
   RawInboundMessage,
@@ -69,6 +71,8 @@ export interface BaileysAdapterOptions {
    * not dead-end linking on the stale latch.
    */
   pairingCodeTtlMs?: number;
+  /** Initial/full history policy (ADR 0007). Defaults to "off". */
+  historySyncMode?: HistorySyncMode;
   log: Logger;
 }
 
@@ -601,6 +605,33 @@ export function mapHistoryResponseFailure(message: WAMessage): {
 }
 
 /**
+ * Parses BOTH outcomes of an on-demand history PDO response. A
+ * REQUEST_SUCCESS (code 0) with no history payload means "no older
+ * history available"; surfacing it lets the import finish as `done`
+ * with 0 instead of a false `history_timeout`.
+ */
+export function mapHistoryResponse(message: WAMessage): {
+  requestId: string | null;
+  kind: "success" | "failure";
+  reason: HistoryFailureReason | null;
+} | null {
+  const response =
+    message.message?.protocolMessage?.peerDataOperationRequestResponseMessage;
+  if (response === null || response === undefined) return null;
+  const requestId = stringOrNull(response.stanzaId);
+  for (const result of response.peerDataOperationResult ?? []) {
+    const history = result.fullHistorySyncOnDemandRequestResponse;
+    if (history === null || history === undefined) continue;
+    const reason = historyFailureFromResponseCode(history.responseCode);
+    if (reason !== null) return { requestId, kind: "failure", reason };
+    if (history.responseCode === 0) {
+      return { requestId, kind: "success", reason: null };
+    }
+  }
+  return null;
+}
+
+/**
  * The `messaging-history.set` payload as delivered by Baileys
  * (Types/Events.d.ts, verified against the installed 6.7.24 sources):
  * `{ chats, contacts, messages, isLatest?, progress?, syncType?,
@@ -632,6 +663,7 @@ export interface HistorySetPayload {
 export function mapHistorySet(
   payload: HistorySetPayload,
   requestedChats: ReadonlySet<string>,
+  origin: "initial" | "on-demand" = "on-demand",
 ): Array<Extract<AdapterEvent, { type: "history" }>> {
   const byChat = new Map<string, RawInboundMessage[]>();
   for (const message of payload.messages) {
@@ -648,6 +680,7 @@ export function mapHistorySet(
     type: "history",
     chatJid,
     messages,
+    origin,
     progress: typeof payload.progress === "number" ? payload.progress : null,
     requestId,
   }));
@@ -667,6 +700,9 @@ export class BaileysAdapter implements WhatsAppAdapter {
    * Bounded by the import service (one import at a time).
    */
   private readonly pendingHistoryChats = new Set<string>();
+  /** Monitored chats eligible for opt-in initial history capture. */
+  private readonly historyCaptureChats = new Set<string>();
+  private readonly historySyncMode: HistorySyncMode;
   /**
    * Outstanding request ids (SA-M3): request id -> chat, for
    * log-only correlation of `messaging-history.set` payloads.
@@ -687,7 +723,9 @@ export class BaileysAdapter implements WhatsAppAdapter {
    */
   private readonly contacts = new Map<string, ContactFields>();
 
-  constructor(private readonly options: BaileysAdapterOptions) {}
+  constructor(private readonly options: BaileysAdapterOptions) {
+    this.historySyncMode = options.historySyncMode ?? "off";
+  }
 
   subscribe(handler: (event: AdapterEvent) => void): () => void {
     this.handlers.add(handler);
@@ -765,26 +803,44 @@ export class BaileysAdapter implements WhatsAppAdapter {
       ...(version !== undefined ? { version } : {}),
       emitOwnEvents: false,
       markOnlineOnConnect: false,
-      // Privacy-minimizing collection (ADR 0004): no bulk history sync
-      // (INITIAL_BOOTSTRAP/RECENT/FULL/PUSH_NAME are never processed —
-      // this also keeps the connect-time sync wait off), but the
-      // ON_DEMAND responses to OUR OWN history requests must be
-      // processed or fetchMessageHistory results would be dropped
-      // before delivery (Baileys gates processing on this predicate in
-      // Socket/chats.js; PROCESSABLE_HISTORY_TYPES includes ON_DEMAND).
-      // Some phones answer an on-demand request with RECENT/FULL and
-      // echo OUR peer-data session id; allow those ONLY while the id is
-      // an outstanding request (mapHistorySet still drops other chats).
-      syncFullHistory: false,
+      // Privacy-minimizing collection (ADR 0004): by default only the
+      // ON_DEMAND responses to OUR OWN history requests are processed.
+      // `WA_HISTORY_SYNC=recent` lets the connect-time RECENT sync
+      // complete (WhatsApp's protocol state machine and app-state sync
+      // depend on it; the payload is dropped), and `full` additionally
+      // captures INITIAL_BOOTSTRAP/RECENT/FULL history for monitored
+      // groups (opt-in backfill, requires a re-link).
+      ...(this.historySyncMode === "off"
+        ? {}
+        : { browser: Browsers.windows("Desktop") }),
+      syncFullHistory: this.historySyncMode === "full",
       shouldSyncHistoryMessage: (historyMsg) => {
         if (
           historyMsg.syncType === proto.HistorySync.HistorySyncType.ON_DEMAND
         ) {
           return true;
         }
+        // Some phones answer an on-demand request with RECENT/FULL and
+        // echo OUR peer-data session id; allow those ONLY while the id is
+        // an outstanding request (mapHistorySet still drops other chats).
         const sessionId = stringOrNull(historyMsg.peerDataRequestSessionId);
+        if (
+          sessionId !== null &&
+          this.pendingHistoryRequestIds.has(sessionId)
+        ) {
+          return true;
+        }
+        if (this.historySyncMode === "off") return false;
+        if (
+          historyMsg.syncType ===
+            proto.HistorySync.HistorySyncType.INITIAL_BOOTSTRAP ||
+          historyMsg.syncType === proto.HistorySync.HistorySyncType.RECENT
+        ) {
+          return true;
+        }
         return (
-          sessionId !== null && this.pendingHistoryRequestIds.has(sessionId)
+          this.historySyncMode === "full" &&
+          historyMsg.syncType === proto.HistorySync.HistorySyncType.FULL
         );
       },
       // No decryption of non-group, non-self JIDs (DMs, newsletters,
@@ -1001,6 +1057,12 @@ export class BaileysAdapter implements WhatsAppAdapter {
     }
   }
 
+  /** Updates the monitored chats eligible for initial history capture. */
+  setHistoryCaptureChats(chatJids: ReadonlySet<string>): void {
+    this.historyCaptureChats.clear();
+    for (const chatJid of chatJids) this.historyCaptureChats.add(chatJid);
+  }
+
   /**
    * Admin logout (ADR 0008). Verified Baileys surface:
    * `logout(msg?: string) => Promise<void>` (Socket/socket.js:327) sends
@@ -1039,10 +1101,41 @@ export class BaileysAdapter implements WhatsAppAdapter {
     // Contact names travel with history payloads; cache them even when
     // the batch contains no messages for an outstanding request.
     this.onContactsChanged(set.contacts ?? []);
-    // Nothing requested: history arriving from bulk sync must never be
-    // surfaced (privacy). This also covers stale batches after an
-    // import completed (the chat was released).
-    if (this.pendingHistoryChats.size === 0) return;
+    // No outstanding on-demand request: this is the connect-time sync.
+    if (this.pendingHistoryChats.size === 0) {
+      if (this.historySyncMode === "off") return;
+      const syncType = set.syncType ?? null;
+      if (this.historySyncMode === "recent") {
+        // Let WhatsApp's state machine complete, but never persist or
+        // surface unrequested history (privacy boundary, ADR 0004).
+        this.options.log("debug", "history_initial_dropped", {
+          syncType,
+          messages: set.messages.length,
+        });
+        return;
+      }
+      // "full": opt-in backfill for MONITORED groups only. The adapter
+      // filters before mapping, so other chats' content is never parsed.
+      const events = mapHistorySet(set, this.historyCaptureChats, "initial");
+      let captured = 0;
+      for (const event of events) {
+        captured += event.messages.length;
+        for (const message of event.messages) {
+          this.rememberContact({
+            id: message.senderJid,
+            notify: message.senderName,
+          });
+        }
+        this.emit(event);
+      }
+      this.options.log("debug", "history_initial_captured", {
+        syncType,
+        messages: set.messages.length,
+        chats: events.length,
+        captured,
+      });
+      return;
+    }
     // SA-M3 (LOG-ONLY for now): correlate to OUR request ids.
     // TODO(live-verify): ENFORCEMENT is pending live verification — the
     // peerDataRequestSessionId echo behavior is unverified against a
@@ -1057,7 +1150,11 @@ export class BaileysAdapter implements WhatsAppAdapter {
         reason: correlation,
       });
     }
-    for (const event of mapHistorySet(set, this.pendingHistoryChats)) {
+    for (const event of mapHistorySet(
+      set,
+      this.pendingHistoryChats,
+      "on-demand",
+    )) {
       for (const message of event.messages) {
         this.rememberContact({ id: message.senderJid, notify: message.senderName });
       }
@@ -1230,24 +1327,28 @@ export class BaileysAdapter implements WhatsAppAdapter {
     // already captured, and history sync is disabled anyway.
     const messages: RawInboundMessage[] = [];
     for (const message of upsert.messages) {
-      // A failed on-demand history response is a PDO response message;
+      // An on-demand history response is a PDO response message;
       // Baileys ignores its result code, so surface it here instead of
       // letting the import burn the full round timeout.
-      const historyFailure = mapHistoryResponseFailure(message);
-      if (historyFailure !== null) {
+      const historyResponse = mapHistoryResponse(message);
+      if (historyResponse !== null) {
         const chatJid =
-          (historyFailure.requestId === null
+          (historyResponse.requestId === null
             ? undefined
-            : this.pendingHistoryRequestIds.get(historyFailure.requestId)) ??
+            : this.pendingHistoryRequestIds.get(historyResponse.requestId)) ??
           (this.pendingHistoryChats.size === 1
             ? [...this.pendingHistoryChats][0]
             : undefined);
         if (chatJid !== undefined) {
-          this.emit({
-            type: "history-error",
-            chatJid,
-            reason: historyFailure.reason,
-          });
+          if (historyResponse.kind === "failure") {
+            this.emit({
+              type: "history-error",
+              chatJid,
+              reason: historyResponse.reason ?? "history_unavailable",
+            });
+          } else {
+            this.emit({ type: "history-success", chatJid });
+          }
         }
       }
       // Cache the sender's push name even if the message itself is

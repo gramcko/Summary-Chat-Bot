@@ -448,6 +448,28 @@ describe("history import: failures and recovery", () => {
     expect(group?.historyError).toBe("history_timeout");
   });
 
+  it("finishes as done with 0 when the phone reports success but no history", async () => {
+    const h = harness({
+      roundTimeoutMs: 100,
+      roundSettleMs: 10,
+      successGraceMs: 10,
+    });
+    seedImport(h.db);
+    h.adapter.onRequestHistory = () => {
+      setTimeout(
+        () => h.adapter.emit({ type: "history-success", chatJid: GROUP_A }),
+        1,
+      );
+    };
+
+    await h.service.runOnce();
+
+    const group = h.db.groups.get(GROUP_A);
+    expect(group?.historyStatus).toBe("done");
+    expect(group?.historyImportedCount).toBe(0);
+    expect(group?.historyError).toBeNull();
+  });
+
   it("stops immediately when the phone reports a failure code", async () => {
     const h = harness();
     seedImport(h.db);

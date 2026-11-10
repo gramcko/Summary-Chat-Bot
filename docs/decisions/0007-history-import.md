@@ -257,3 +257,51 @@ confirmed, unmatched payloads should be dropped outright.
   at startup so a slow-but-active import can never be requeued as stale.
 - The per-round receive buffer is capped at `maxMessages × 2` with a
   counted `history_buffer_overflow` drop, and released after each round.
+
+## Live-verification update (2026-11-10): why on-demand still times out
+
+The on-demand request itself is correct (real anchor, `oldestMsgTimestampMs`
+in milliseconds, count <= 50, ON_DEMAND enabled), but WhatsApp does not
+reliably answer `fetchMessageHistory` for companion devices. This is a
+known upstream limitation, not a request-shape bug:
+
+- Baileys issues [#2452](https://github.com/WhiskeySockets/Baileys/issues/2452)
+  and [#1934](https://github.com/WhiskeySockets/Baileys/issues/1934): the
+  request is relayed and a session id is returned, but no
+  `messaging-history.set` / `HISTORY_SYNC_NOTIFICATION` arrives.
+- Baileys issue [#2580](https://github.com/WhiskeySockets/Baileys/issues/2580)
+  tracks a v7 regression where the event was not emitted at all; it was
+  fixed by marking peer-routed self stanzas as `fromMe`
+  ([commit 5ddc231](https://github.com/WhiskeySockets/Baileys/commit/5ddc231)).
+  The pinned 6.7.24 build already contains that decode fix.
+- WhatsApp Web's own on-demand history requires the initial history sync
+  and app-state sync to have completed; a whatsapp-web.js investigation
+  ([#201890](https://github.com/wwebjs/whatsapp-web.js/issues/201890))
+  found that the phone replied but Web discarded the response until those
+  gates were satisfied.
+- WhatsApp's help center: the phone sends recent history when a device is
+  linked, Desktop receives more than Web, and there is no full-archive
+  guarantee (https://faq.whatsapp.com/653480766448040).
+
+Consequences for this project:
+
+1. **Default (`WA_HISTORY_SYNC=off`)** remains privacy-first: only
+   ON_DEMAND responses to explicit imports are processed.
+2. **`WA_HISTORY_SYNC=recent`** lets Baileys complete the connect-time
+   RECENT/INITIAL_BOOTSTRAP sync and app-state sync (the payload is
+   dropped). Some phones only answer ON_DEMAND after this state machine
+   has run. This is the least invasive way to try to fix on-demand.
+3. **`WA_HISTORY_SYNC=full`** additionally requests `syncFullHistory` with
+   a Windows Desktop browser preset and captures INITIAL_BOOTSTRAP /
+   RECENT / FULL history for **monitored groups only**. This is the
+   reliable backfill path, but it requires a WhatsApp **re-link** to
+   trigger the initial sync and decrypts recent group history in memory
+   (unmonitored chats are filtered before mapping and are never stored).
+   It is opt-in because it changes the ADR 0004 privacy posture.
+4. A phone `REQUEST_SUCCESS` with no history payload now finishes the
+   import as **`done` with 0 imported** (no older history) instead of a
+   false `history_timeout`.
+
+Operational recommendation: try `recent` and a re-link first; if the phone
+still does not answer ON_DEMAND, use `full` and re-link. Keep the primary
+phone online while importing.

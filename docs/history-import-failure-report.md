@@ -158,3 +158,40 @@ If the phone sends a history notification from a JID the adapter treats as non-s
 - `bot-worker/src/db.ts` — `getOldestMessageCursor`, import state.
 - `backend/src/lib/postgres-store.ts` — import state read/write.
 - `docs/decisions/0007-history-import.md` — design and known limitations.
+
+## Web research update (2026-11-10)
+
+The remaining failure is consistent with a known Baileys/WhatsApp limitation
+for companion devices, not a local request-shape defect:
+
+- `fetchMessageHistory` returns a request id but the phone never sends a
+  `HISTORY_SYNC_NOTIFICATION` / `messaging-history.set` payload:
+  Baileys #2452 and #1934.
+- Baileys v7 had a separate regression where the event was not emitted even
+  for initial sync; it was fixed by marking peer-routed self stanzas as
+  `fromMe` (commit `5ddc231`). The pinned 6.7.24 already includes that
+  decode fix.
+- WhatsApp Web's own on-demand flow requires the initial history sync and
+  app-state sync to be complete before it accepts the response
+  (whatsapp-web.js #201890).
+- WhatsApp's help center confirms that linked devices receive a recent
+  history window (Desktop receives more than Web) and that there is no
+  full-archive guarantee.
+
+Implemented mitigations:
+
+1. `WA_HISTORY_SYNC=recent` lets the connect-time RECENT/INITIAL_BOOTSTRAP
+   sync complete (payload dropped) so the protocol state machine and
+   app-state sync run. Try this first, then re-link.
+2. `WA_HISTORY_SYNC=full` additionally requests `syncFullHistory` with a
+   Windows Desktop browser preset and captures initial/full history for
+   monitored groups only. This is the reliable backfill path; it requires a
+   re-link and is opt-in because of the ADR 0004 privacy posture.
+3. A phone `REQUEST_SUCCESS` with no history payload now finishes as
+   `done` with 0 imported instead of `history_timeout`.
+4. Safe diagnostics were added for initial-sync drops/captures and
+   success-without-payload; no message content is logged.
+
+If `full` still imports nothing after a re-link, the remaining causes are
+phone/account-side (primary offline, account type unsupported, or WhatsApp
+not returning history for that chat).
