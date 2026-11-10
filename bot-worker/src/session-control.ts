@@ -1,7 +1,7 @@
 import type { BotDb } from "./db.js";
 import { errorReason } from "./lib/errors.js";
 import type { Logger } from "./lib/log.js";
-import type { WhatsAppAdapter } from "./whatsapp/adapter.js";
+import type { SessionCheckResult, WhatsAppAdapter } from "./whatsapp/adapter.js";
 import { purgeSessionDir } from "./whatsapp/session-storage.js";
 
 /**
@@ -33,6 +33,9 @@ import { purgeSessionDir } from "./whatsapp/session-storage.js";
 
 /** Default bound on the remote logout call (M-1). */
 export const LOGOUT_TIMEOUT_MS = 15_000;
+
+/** Bound on the live session health probe. */
+export const SESSION_CHECK_TIMEOUT_MS = 10_000;
 
 export interface SessionControlServiceOptions {
   adapter: WhatsAppAdapter;
@@ -130,7 +133,12 @@ export class SessionControlService {
     }
 
     const requestedAt = await this.db.consumeLogoutRequest();
-    if (requestedAt === null) return false;
+    if (requestedAt === null) {
+      // No logout pending: process an admin-requested session health
+      // check (the dashboard "Test session" button).
+      await this.runSessionCheck();
+      return false;
+    }
     if (this.loggedOut) {
       // Idempotent (ADR 0008): still logged out and not re-armed — the
       // request only cleared the flag, there is nothing to tear down.
@@ -188,6 +196,36 @@ export class SessionControlService {
       this.log("error", "session_rearm_failed", { reason: errorReason(error) });
     }
     return true;
+  }
+
+  /**
+   * Processes at most one pending session health check. The adapter
+   * probe is bounded so a stalled network cannot block logout/control.
+   * The result write is fenced by the request timestamp, so a newer
+   * request is never overwritten by an older probe.
+   */
+  private async runSessionCheck(): Promise<void> {
+    const claim = await this.db.claimSessionCheck();
+    if (claim === null) return;
+    let result: SessionCheckResult;
+    try {
+      result = await withTimeout(
+        this.adapter.checkSession(),
+        SESSION_CHECK_TIMEOUT_MS,
+      );
+    } catch (error) {
+      result = {
+        ok: false,
+        latencyMs: null,
+        error: errorReason(error).slice(0, 200),
+      };
+    }
+    const completed = await this.db.completeSessionCheck(claim, result);
+    this.log("info", "session_check_completed", {
+      ok: result.ok,
+      latencyMs: result.latencyMs,
+      completed,
+    });
   }
 
   private scheduleNext(): void {

@@ -118,7 +118,8 @@ describe.skipIf(!process.env["DATABASE_URL"])(
       // Test-database hygiene only; the dev database is disposable.
       await pool.query(
         "TRUNCATE TABLE summaries, summary_runs, messages, groups, " +
-          "group_members, admin_sessions, admin_credentials, ai_provider_configs, " +
+          "group_members, contact_overrides, admin_sessions, " +
+          "admin_credentials, ai_provider_configs, " +
           "whatsapp_connections CASCADE",
       );
     });
@@ -492,6 +493,7 @@ describe.skipIf(!process.env["DATABASE_URL"])(
           since,
           lastMessageAt: since,
           linking: null,
+          check: null,
         });
         const status = await store.getConnectionStatus();
         expect(status.state).toBe("connected");
@@ -1011,6 +1013,7 @@ describe.skipIf(!process.env["DATABASE_URL"])(
           since: nowIso(),
           lastMessageAt: null,
           linking: null,
+          check: null,
         });
 
         // Linking appears while valid (and in a linking state) and hides
@@ -1042,6 +1045,7 @@ describe.skipIf(!process.env["DATABASE_URL"])(
           since: nowIso(),
           lastMessageAt: null,
           linking: null,
+          check: null,
         });
         expect((await store.getConnectionStatus()).linking).toBeNull();
         await store.setConnectionStatus({
@@ -1049,6 +1053,7 @@ describe.skipIf(!process.env["DATABASE_URL"])(
           since: nowIso(),
           lastMessageAt: null,
           linking: null,
+          check: null,
         });
         await store.updateConnectionLinking({
           qr: "2@expired",

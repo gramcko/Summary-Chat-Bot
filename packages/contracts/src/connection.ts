@@ -26,18 +26,34 @@ export const ConnectionLinking = z.object({
 });
 
 /**
+ * Result of an on-demand session health check. `pending` means the admin
+ * requested a check and the bot-worker has not answered yet; `ok`/`failed`
+ * include the measured latency and a safe error code.
+ */
+export const ConnectionCheck = z.object({
+  status: z.enum(["pending", "ok", "failed"]),
+  requestedAt: IsoDateTime,
+  checkedAt: IsoDateTime.nullable(),
+  latencyMs: z.number().int().min(0).nullable(),
+  error: z.string().max(200).nullable(),
+});
+
+/**
  * Non-secret connection status. Never includes authentication
  * material. `linking` is non-null only while the session is being
  * linked (QR/pairing payload available); it is null once connected (or
- * when no linking is in progress).
+ * when no linking is in progress). `check` is the latest session health
+ * probe result, or null when no check was ever requested.
  */
 export const ConnectionStatus = z.object({
   state: ConnectionState,
   since: IsoDateTime,
   lastMessageAt: IsoDateTime.nullable(),
   linking: ConnectionLinking.nullable(),
+  check: ConnectionCheck.nullable(),
 });
 
 export type ConnectionState = z.infer<typeof ConnectionState>;
 export type ConnectionLinking = z.infer<typeof ConnectionLinking>;
+export type ConnectionCheck = z.infer<typeof ConnectionCheck>;
 export type ConnectionStatus = z.infer<typeof ConnectionStatus>;

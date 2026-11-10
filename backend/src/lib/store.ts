@@ -310,6 +310,12 @@ export interface Store {
   getConnectionStatus(): Promise<ConnectionStatus>;
   setConnectionStatus(status: ConnectionStatus): Promise<void>;
   /**
+   * Requests a live WhatsApp session health check. Sets the request
+   * timestamp and clears any previous result; the bot-worker performs
+   * the bounded probe and writes the outcome.
+   */
+  requestSessionCheck(): Promise<void>;
+  /**
    * Sets (or clears with null) the pairing QR / payload displayed by
    * the bot-worker (ADR 0008). The QR is a live pairing ticket: it is
    * served only on the authenticated API and must never be logged.
@@ -357,6 +363,7 @@ export class InMemoryStore implements Store {
     since: nowIso(),
     lastMessageAt: null,
     linking: null,
+    check: null,
   };
   private logoutRequestedAt: string | null = null;
   private readonly members = new Map<string, Map<string, GroupMember>>();
@@ -916,7 +923,25 @@ export class InMemoryStore implements Store {
     // Only the state fields are mutable here; the pairing-queue
     // ("linking") state is written exclusively by
     // updateConnectionLinking (mirrors the SQL columns — ADR 0008).
-    this.connection = { ...status, linking: this.connection.linking };
+    // The session-check result is owned by requestSessionCheck/worker.
+    this.connection = {
+      ...status,
+      linking: this.connection.linking,
+      check: this.connection.check,
+    };
+  }
+
+  async requestSessionCheck(): Promise<void> {
+    this.connection = {
+      ...this.connection,
+      check: {
+        status: "pending",
+        requestedAt: nowIso(),
+        checkedAt: null,
+        latencyMs: null,
+        error: null,
+      },
+    };
   }
 
   async updateConnectionLinking(

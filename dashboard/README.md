@@ -107,20 +107,22 @@ nothing is restored.
 ## Screens
 
 The app shell is a left sidebar (Overview, Groups, Contacts, Summary runs,
-Connection, Settings) with sign-out at the bottom. On desktop it can collapse
-to an icon-only rail; on small screens it becomes a focus-trapped drawer. A
-skip link, `<nav>`/`<main>` landmarks, visible focus rings, and `aria-live`
-async states are part of the shell. Summary-run status changes and other
-actions raise in-app toast notifications.
+Connection, Settings) with sign-out at the bottom. On desktop it is an
+icon-only rail that expands on hover/focus with an animated overlay; on small
+screens it becomes a focus-trapped drawer. A skip link, `<nav>`/`<main>`
+landmarks, visible focus rings, and `aria-live` async states are part of the
+shell. Summary-run status changes and other actions raise in-app toast
+notifications.
 
 - `/setup` — one-time administrator password + recovery codes (shown once).
 - `/login`, `/recover` — session sign-in and single-use recovery code flow.
 - `/` — connection health, recent summary runs, group shortcuts.
 - `/connection` — live WhatsApp pairing payload (a QR code, or a typed pairing
   code when the bot worker is configured with a phone number), refreshed while
-  linking with an expiry countdown, connection details, and an **End session /
-  Unlink** action (`POST /api/connection/logout`, confirmed; polling continues
-  until the re-armed pairing payload appears).
+  linking with an expiry countdown, connection details, a **Test session**
+  live health probe, and an **End session / Unlink** action
+  (`POST /api/connection/logout`, confirmed; polling continues until the
+  re-armed pairing payload appears).
 - `/groups` — every captured group, with monitored/import badges, search by
   name/chat id, and an All / Monitored / Not monitored filter.
 - `/groups/[id]` — tabs: **Summaries** (past summaries per group, link to the

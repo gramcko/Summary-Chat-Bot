@@ -971,7 +971,46 @@ describe.skipIf(!shouldRun)(
       expect(unchanged.rows[0]?.name).toBe("Ana");
     });
 
-    it("logout request is consumed once and finalizeLogout clears the row", async () => {      const connectionId = await db.ensureConnection();
+    it("claims and completes a session health check (millisecond fence)", async () => {
+      const connectionId = await db.ensureConnection();
+      await pool.query(
+        `UPDATE whatsapp_connections
+         SET session_check_requested_at = now(),
+             session_check_checked_at = NULL,
+             session_check_ok = NULL,
+             session_check_latency_ms = NULL,
+             session_check_error = NULL
+         WHERE id = $1`,
+        [connectionId],
+      );
+
+      const claim = await db.claimSessionCheck();
+      expect(claim).not.toBeNull();
+      const completed = await db.completeSessionCheck(claim!, {
+        ok: true,
+        latencyMs: 42,
+        error: null,
+      });
+      expect(completed).toBe(true);
+
+      const row = await pool.query<{
+        session_check_checked_at: Date | null;
+        session_check_ok: boolean | null;
+        session_check_latency_ms: number | null;
+      }>(
+        "SELECT session_check_checked_at, session_check_ok, " +
+          "session_check_latency_ms FROM whatsapp_connections WHERE id = $1",
+        [connectionId],
+      );
+      expect(row.rows[0]?.session_check_checked_at).toBeInstanceOf(Date);
+      expect(row.rows[0]?.session_check_ok).toBe(true);
+      expect(row.rows[0]?.session_check_latency_ms).toBe(42);
+      // Completed checks are not claimed again.
+      expect(await db.claimSessionCheck()).toBeNull();
+    });
+
+    it("logout request is consumed once and finalizeLogout clears the row", async () => {
+      const connectionId = await db.ensureConnection();
       await db.setLinkingQr(connectionId, {
         qr: "STALE-QR",
         expiresAt: new Date(),

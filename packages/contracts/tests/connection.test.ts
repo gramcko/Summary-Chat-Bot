@@ -5,6 +5,8 @@ const BASE = {
   state: "connected",
   since: "2026-11-01T09:00:00Z",
   lastMessageAt: "2026-11-01T09:15:00Z",
+  linking: null,
+  check: null,
 };
 
 describe("ConnectionStatus.linking (pairing ticket, ADR 0008)", () => {
@@ -40,11 +42,49 @@ describe("ConnectionStatus.linking (pairing ticket, ADR 0008)", () => {
     ).toBe(false);
     // The field itself is required-but-nullable (like every system
     // field in this API surface).
-    expect(
-      ConnectionStatus.safeParse({
-        ...BASE,
-      }).success,
-    ).toBe(false);
+    const { linking: _linking, ...withoutLinking } = BASE;
+    expect(ConnectionStatus.safeParse(withoutLinking).success).toBe(false);
+  });
+});
+
+describe("ConnectionStatus.check (session health probe)", () => {
+  it("accepts pending, ok, failed, and null", () => {
+    const pending = ConnectionStatus.parse({
+      ...BASE,
+      check: {
+        status: "pending",
+        requestedAt: "2026-11-01T10:00:00Z",
+        checkedAt: null,
+        latencyMs: null,
+        error: null,
+      },
+    });
+    expect(pending.check?.status).toBe("pending");
+
+    const ok = ConnectionStatus.parse({
+      ...BASE,
+      check: {
+        status: "ok",
+        requestedAt: "2026-11-01T10:00:00Z",
+        checkedAt: "2026-11-01T10:00:01Z",
+        latencyMs: 42,
+        error: null,
+      },
+    });
+    expect(ok.check?.latencyMs).toBe(42);
+
+    const failed = ConnectionStatus.parse({
+      ...BASE,
+      check: {
+        status: "failed",
+        requestedAt: "2026-11-01T10:00:00Z",
+        checkedAt: "2026-11-01T10:00:10Z",
+        latencyMs: 10_000,
+        error: "check_timeout",
+      },
+    });
+    expect(failed.check?.error).toBe("check_timeout");
+    expect(ConnectionStatus.parse({ ...BASE, check: null }).check).toBeNull();
   });
 });
 

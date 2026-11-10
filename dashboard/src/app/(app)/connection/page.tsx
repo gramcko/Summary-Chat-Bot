@@ -3,6 +3,7 @@
 import type { ConnectionStatus } from "@summarly/contracts";
 import { useEffect, useState, type ReactNode } from "react";
 import { PairingDetails } from "@/components/connection/PairingDetails";
+import { useNotifications } from "@/components/notifications/NotificationProvider";
 import { Alert } from "@/components/ui/Alert";
 import { ConnectionBadge, connectionHint } from "@/components/ui/Badges";
 import { Button } from "@/components/ui/Button";
@@ -65,9 +66,53 @@ function LinkedPanel({ status }: { status: ConnectionStatus }) {
   );
 }
 
+function SessionCheckView({
+  check,
+}: {
+  check: ConnectionStatus["check"];
+}) {
+  if (check === null) {
+    return (
+      <p className="text-xs text-slate-500">
+        No session test has been run yet.
+      </p>
+    );
+  }
+  if (check.status === "pending") {
+    return (
+      <p role="status" className="text-xs font-medium text-slate-600">
+        Testing the WhatsApp session…
+      </p>
+    );
+  }
+  const ok = check.status === "ok";
+  return (
+    <div
+      className={`rounded-lg border px-3 py-2 text-sm ${
+        ok
+          ? "border-emerald-200 bg-emerald-50 text-emerald-900"
+          : "border-red-200 bg-red-50 text-red-900"
+      }`}
+    >
+      <p className="font-medium">
+        {ok ? "Session is working" : "Session test failed"}
+      </p>
+      <p className="mt-0.5 text-xs">
+        {ok
+          ? `Latency ${check.latencyMs ?? "?"} ms`
+          : (check.error ?? "No response from the session.")}
+        {check.checkedAt === null
+          ? ""
+          : ` · ${formatDateTime(check.checkedAt)}`}
+      </p>
+    </div>
+  );
+}
+
 export default function ConnectionPage() {
   const connection = useResource(() => api.connection(), []);
   const status = connection.data;
+  const { notify } = useNotifications();
   /**
    * After an unlink the bot worker re-arms pairing within seconds. The status
    * can still read "connected" for a moment (the request is asynchronous), so
@@ -76,7 +121,15 @@ export default function ConnectionPage() {
    * QR / pairing code appears.
    */
   const [refreshAfterUnlink, setRefreshAfterUnlink] = useState(false);
-  const polling = refreshAfterUnlink || shouldPollConnection(status);
+  const [refreshAfterTest, setRefreshAfterTest] = useState(false);
+  const [testing, setTesting] = useState(false);
+  const [testError, setTestError] = useState<string | null>(null);
+  const checkPending = status?.check?.status === "pending";
+  const polling =
+    refreshAfterUnlink ||
+    refreshAfterTest ||
+    checkPending ||
+    shouldPollConnection(status);
   const reload = connection.reload;
 
   const [now, setNow] = useState(() => Date.now());
@@ -107,6 +160,51 @@ export default function ConnectionPage() {
       setRefreshAfterUnlink(false);
     }
   }, [refreshAfterUnlink, status]);
+
+  // Finish a requested session test: stop the forced polling and announce
+  // the result once the worker writes ok/failed.
+  useEffect(() => {
+    if (!refreshAfterTest) return;
+    const check = status?.check;
+    if (check === undefined || check === null || check.status === "pending") {
+      return;
+    }
+    setRefreshAfterTest(false);
+    if (check.status === "ok") {
+      notify({
+        title: "WhatsApp session is working",
+        description: `Live probe succeeded${
+          check.latencyMs === null ? "" : ` in ${check.latencyMs} ms`
+        }.`,
+        tone: "success",
+      });
+    } else {
+      notify({
+        title: "WhatsApp session test failed",
+        description: check.error ?? "The session did not respond.",
+        tone: "error",
+      });
+    }
+  }, [refreshAfterTest, status, notify]);
+
+  async function handleTestSession(): Promise<void> {
+    setTesting(true);
+    setTestError(null);
+    try {
+      await api.testConnection();
+      setRefreshAfterTest(true);
+      reload();
+    } catch (cause) {
+      setTestError(toApiError(cause).message);
+      notify({
+        title: "Could not start the session test",
+        description: toApiError(cause).message,
+        tone: "error",
+      });
+    } finally {
+      setTesting(false);
+    }
+  }
 
   async function handleUnlink(): Promise<void> {
     setUnlinking(true);
@@ -190,6 +288,40 @@ export default function ConnectionPage() {
                     )}
                   </Detail>
                 </dl>
+
+                <div className="mt-5 border-t border-slate-200 pt-4">
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <div>
+                      <p className="text-sm font-medium text-slate-900">
+                        Session health
+                      </p>
+                      <p className="text-xs text-slate-500">
+                        Run a live probe to confirm the linked session can still
+                        reach WhatsApp.
+                      </p>
+                    </div>
+                    <Button
+                      variant="secondary"
+                      size="sm"
+                      loading={testing || checkPending}
+                      onClick={() => void handleTestSession()}
+                      disabled={testing || checkPending}
+                    >
+                      Test session
+                    </Button>
+                  </div>
+                  <div className="mt-3">
+                    <SessionCheckView check={status.check} />
+                  </div>
+                  {testError === null ? null : (
+                    <p
+                      role="alert"
+                      className="mt-2 text-xs font-medium text-red-700"
+                    >
+                      {testError}
+                    </p>
+                  )}
+                </div>
 
                 <div className="mt-5 border-t border-slate-200 pt-4">
                   <Button

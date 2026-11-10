@@ -35,6 +35,7 @@ function createState() {
       since: "2026-10-29T06:00:00.000Z",
       lastMessageAt: "2026-10-29T11:58:00.000Z",
       linking: null,
+      check: null,
     },
     groups: [
       {
@@ -383,8 +384,23 @@ async function handle(req, res, state) {
           qr: "2@smoke-pairing-ticket-not-a-real-code,smoke",
           expiresAt: new Date(Date.now() + 60_000).toISOString(),
         },
+        check: null,
       };
     }
+    return sendJson(res, 202, { ok: true });
+  }
+
+  if (path === "/api/connection/test" && method === "POST") {
+    state.connection = {
+      ...state.connection,
+      check: {
+        status: "pending",
+        requestedAt: new Date().toISOString(),
+        checkedAt: null,
+        latencyMs: null,
+        error: null,
+      },
+    };
     return sendJson(res, 202, { ok: true });
   }
 

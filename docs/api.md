@@ -79,7 +79,7 @@ in-memory throttle.
 
 | Method | Path | Response | Notes |
 | --- | --- | --- | --- |
-| GET | `/api/connection` | `ConnectionStatus` | Non-secret WhatsApp connection state. `linking` carries the pairing QR + expiry while linking (see session control below); `null` otherwise. |
+| GET | `/api/connection` | `ConnectionStatus` | Non-secret WhatsApp connection state. `linking` carries the pairing QR + expiry while linking (see session control below); `null` otherwise. `check` carries the latest live session health probe (`pending`/`ok`/`failed`), or `null` when none was requested. |
 | GET | `/api/groups` | `Group[]` | Monitored groups. |
 | GET | `/api/groups/:id` | `Group` | Single group (detail screen). `400` non-UUID id; `404` unknown. |
 | GET | `/api/groups/:id/members` | `GroupMember[]` | Best-effort roster snapshot (admin names first, then alphabetical). `[]` when no chat is discovered yet. **Monitored groups only** (fix round B, H-1): `409` with `"Group is not monitored."` when the group is not monitored (same privacy boundary as history import), `404` unknown group. Names/JIDs are PII (admin-only data). |
@@ -96,6 +96,7 @@ in-memory throttle.
 | GET | `/api/summary-runs/:id` | `SummaryRun` | |
 | POST | `/api/summary-runs/:id/retry` | `SummaryRun` | `failed → pending` **and re-enqueues the run**; no-op for `pending`/`processing`; `409` for `completed` (regeneration is an open decision). |
 | POST | `/api/connection/logout` | `{ "ok": true }` (202) | End/unlink the WhatsApp session (see session control below). Idempotent: `202` also while a request is pending. |
+| POST | `/api/connection/test` | `{ "ok": true }` (202) | Requests a live session health probe. The bot-worker performs a bounded WhatsApp query and writes the result to `ConnectionStatus.check`; poll `GET /api/connection` for `pending` → `ok`/`failed`. |
 | GET | `/api/summaries/:id` | `Summary` | `404` until the summary-worker has completed the run. |
 | GET | `/api/summary-runs/:id/summary` | `Summary` | `404` for an unknown run or a run without a summary yet. |
 | GET | `/api/settings/ai-provider` | `ProviderConfigPublic` | `404` when unconfigured. Never returns key material. |
@@ -283,6 +284,12 @@ end the session:
   **bot-worker consumes the flag** (ends the session, clears the stored
   credentials, resets the connection state) and clears the request.
   Until then the request stays pending and visible in server state.
+- `POST /api/connection/test` requests a **live session health check**.
+  The bot-worker performs a bounded probe (socket open + a lightweight
+  WhatsApp USync status query) and writes `ConnectionStatus.check` with
+  `status` (`pending`/`ok`/`failed`), latency, timestamp, and a safe error
+  code. It never returns message content or credentials. Poll
+  `GET /api/connection` until the status leaves `pending`.
 
 ## Environment variables
 

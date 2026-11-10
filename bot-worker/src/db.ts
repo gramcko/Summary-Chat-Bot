@@ -1,7 +1,11 @@
 import { randomUUID } from "node:crypto";
 import type { Pool, QueryResultRow } from "pg";
 import type { NewMessage } from "./normalize.js";
-import type { DiscoveredChat, HistoryCursor } from "./whatsapp/adapter.js";
+import type {
+  DiscoveredChat,
+  HistoryCursor,
+  SessionCheckResult,
+} from "./whatsapp/adapter.js";
 
 /**
  * bot-worker's own thin PostgreSQL access layer (architecture §4.3/§4.5,
@@ -46,6 +50,12 @@ export interface HistoryImportClaim {
   requestedAt: Date;
   /** Claim timestamp; guards completion against stale/older claims. */
   startedAt: Date;
+}
+
+/** A pending session health check (ADR 0008 follow-up). */
+export interface SessionCheckClaim {
+  connectionId: string;
+  requestedAt: Date;
 }
 
 export interface HistoryImportOutcome {
@@ -214,6 +224,21 @@ export interface BotDb {
    * kind. Returns how many rows were cleared.
    */
   clearExpiredLinking(): Promise<number>;
+  /**
+   * Returns a pending session health check (requested by the backend)
+   * or null. A check is pending when `session_check_requested_at` is set
+   * and no later `session_check_checked_at` exists.
+   */
+  claimSessionCheck(): Promise<SessionCheckClaim | null>;
+  /**
+   * Writes the result of a claimed session check. Fenced by the claim's
+   * `requestedAt` so a newer request is never overwritten by an older
+   * probe. Returns true when the row was updated.
+   */
+  completeSessionCheck(
+    claim: SessionCheckClaim,
+    result: SessionCheckResult,
+  ): Promise<boolean>;
   /**
    * Best-effort roster sync for ONE chat (ADR 0008): upserts the given
    * members as active (keeping a previously stored name when the new
@@ -658,6 +683,52 @@ export class PostgresBotDb implements BotDb {
          AND linking_qr_expires_at < now()`,
     );
     return result.rowCount ?? 0;
+  }
+
+  async claimSessionCheck(): Promise<SessionCheckClaim | null> {
+    const result = await this.pool.query<{
+      id: string;
+      session_check_requested_at: Date;
+    }>(
+      `SELECT id, session_check_requested_at
+       FROM whatsapp_connections
+       WHERE session_check_requested_at IS NOT NULL
+         AND (
+           session_check_checked_at IS NULL
+           OR session_check_checked_at < session_check_requested_at
+         )
+       LIMIT 1`,
+    );
+    const row = result.rows[0];
+    if (row === undefined) return null;
+    return {
+      connectionId: row.id,
+      requestedAt: row.session_check_requested_at,
+    };
+  }
+
+  async completeSessionCheck(
+    claim: SessionCheckClaim,
+    result: SessionCheckResult,
+  ): Promise<boolean> {
+    const updated = await this.pool.query(
+      `UPDATE whatsapp_connections
+       SET session_check_checked_at = now(),
+           session_check_ok = $2,
+           session_check_latency_ms = $3,
+           session_check_error = $4,
+           updated_at = now()
+       WHERE id = $1
+         AND date_trunc('milliseconds', session_check_requested_at) = $5`,
+      [
+        claim.connectionId,
+        result.ok,
+        result.latencyMs,
+        result.error === null ? null : result.error.slice(0, 200),
+        claim.requestedAt,
+      ],
+    );
+    return (updated.rowCount ?? 0) > 0;
   }
 
   async syncGroupMembers(

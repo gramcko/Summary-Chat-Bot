@@ -12,7 +12,7 @@ Redis/BullMQ, and a Next.js dashboard.
 ## Features
 
 - **WhatsApp linking** — QR or phone-number pairing code from the dashboard;
-  in-app **End session / Unlink**.
+  in-app **End session / Unlink**, plus a live **Test session** health probe.
 - **Group discovery and opt-in monitoring** — groups are discovered
   unmonitored; the admin opts each one in.
 - **Daily and manual summaries** — scheduled or on-demand, per group, with
@@ -230,6 +230,7 @@ scripts/          Provider smoke test and e2e harness
 
 - [`docs/architecture.md`](docs/architecture.md) — system architecture and data flow
 - [`docs/api.md`](docs/api.md) — HTTP API reference
+- [`docs/history-import-failure-report.md`](docs/history-import-failure-report.md) — history-import failure analysis and fixes
 - [`docs/decisions/`](docs/decisions/) — architecture decision records (ADRs)
 - [`AGENTS.md`](AGENTS.md) — repository working rules and verification commands
 - [`dashboard/README.md`](dashboard/README.md) — dashboard-specific notes

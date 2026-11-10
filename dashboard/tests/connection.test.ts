@@ -14,6 +14,7 @@ function status(state: ConnectionStatus["state"]): ConnectionStatus {
     since: "2026-11-04T09:00:00.000Z",
     lastMessageAt: null,
     linking: null,
+    check: null,
   };
 }
 

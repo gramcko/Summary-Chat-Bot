@@ -21,4 +21,14 @@ export function registerConnectionRoutes(
     await store.requestLogout();
     return reply.status(202).send({ ok: true });
   });
+
+  /**
+   * Requests a live session health check. The backend only records the
+   * request; the bot-worker performs the bounded probe and writes the
+   * result, which `GET /api/connection` exposes as `check`.
+   */
+  app.post("/api/connection/test", async (_request, reply) => {
+    await store.requestSessionCheck();
+    return reply.status(202).send({ ok: true });
+  });
 }

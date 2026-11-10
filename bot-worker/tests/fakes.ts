@@ -9,6 +9,7 @@ import type {
   InsertMessagesResult,
   LinkingPayload,
   ConnectionState,
+  SessionCheckClaim,
   SyncMembersResult,
   UpsertChatsResult,
 } from "../src/db.js";
@@ -21,6 +22,7 @@ import type {
   HistoryCursor,
   HistoryFetchRequest,
   RawInboundMessage,
+  SessionCheckResult,
   WhatsAppAdapter,
 } from "../src/whatsapp/adapter.js";
 
@@ -61,6 +63,12 @@ export class FakeAdapter implements WhatsAppAdapter {
   logoutCalls = 0;
   /** Makes logout() hang (M-1 timeout tests) or throw. */
   logoutBehavior: "ok" | "hang" | "throw" = "ok";
+  /** Result returned by checkSession(). */
+  sessionCheckResult: SessionCheckResult = {
+    ok: true,
+    latencyMs: 12,
+    error: null,
+  };
 
   private readonly handlers = new Set<(event: AdapterEvent) => void>();
 
@@ -85,6 +93,10 @@ export class FakeAdapter implements WhatsAppAdapter {
     this.rosterRequests.push(chatJid);
     if (this.rosterError !== null) throw this.rosterError;
     return [...(this.rosterResults.get(chatJid) ?? [])];
+  }
+
+  async checkSession(): Promise<SessionCheckResult> {
+    return this.sessionCheckResult;
   }
 
   async logout(): Promise<void> {
@@ -194,6 +206,12 @@ export class FakeDb implements BotDb {
   >();
   /** Pending admin logout request (ADR 0008). */
   logoutRequestedAt: Date | null = null;
+  /** Session health check fields (ADR 0008 follow-up). */
+  sessionCheckRequestedAt: Date | null = null;
+  sessionCheckCheckedAt: Date | null = null;
+  sessionCheckOk: boolean | null = null;
+  sessionCheckLatencyMs: number | null = null;
+  sessionCheckError: string | null = null;
   /** finalizeLogout() call count. */
   finalizeLogoutCalls = 0;
   /**
@@ -521,6 +539,44 @@ export class FakeDb implements BotDb {
       }
     }
     return updated;
+  }
+
+  async claimSessionCheck(): Promise<SessionCheckClaim | null> {
+    const requestedAt = this.sessionCheckRequestedAt;
+    if (requestedAt === null) return null;
+    if (
+      this.sessionCheckCheckedAt !== null &&
+      this.sessionCheckCheckedAt >= requestedAt
+    ) {
+      return null;
+    }
+    return { connectionId: this.connectionId, requestedAt };
+  }
+
+  async completeSessionCheck(
+    claim: SessionCheckClaim,
+    result: SessionCheckResult,
+  ): Promise<boolean> {
+    if (
+      this.sessionCheckRequestedAt === null ||
+      this.sessionCheckRequestedAt.getTime() !== claim.requestedAt.getTime()
+    ) {
+      return false;
+    }
+    this.sessionCheckCheckedAt = new Date();
+    this.sessionCheckOk = result.ok;
+    this.sessionCheckLatencyMs = result.latencyMs;
+    this.sessionCheckError = result.error;
+    return true;
+  }
+
+  /** Simulates the backend requesting a session health check. */
+  requestSessionCheck(): void {
+    this.sessionCheckRequestedAt = new Date();
+    this.sessionCheckCheckedAt = null;
+    this.sessionCheckOk = null;
+    this.sessionCheckLatencyMs = null;
+    this.sessionCheckError = null;
   }
 
   async consumeLogoutRequest(): Promise<Date | null> {

@@ -96,6 +96,15 @@ export interface ContactNameUpdate {
   name: string;
 }
 
+/** Result of a live WhatsApp session health probe. */
+export interface SessionCheckResult {
+  ok: boolean;
+  /** Round-trip latency in milliseconds (null when not measured). */
+  latencyMs: number | null;
+  /** Safe error code/message; never contains message content or secrets. */
+  error: string | null;
+}
+
 /** A group chat the linked account participates in. */
 export interface DiscoveredChat {
   chatJid: string;
@@ -242,6 +251,12 @@ export interface WhatsAppAdapter {
    * empty roster as "no data", never as "the group is empty" (ADR 0008).
    */
   fetchRoster(chatJid: string): Promise<GroupMemberInfo[]>;
+  /**
+   * Live session health probe: checks that the socket is open and that a
+   * lightweight WhatsApp query succeeds. Never logs or returns message
+   * content; a failure returns a safe code.
+   */
+  checkSession(): Promise<SessionCheckResult>;
   /**
    * Ends the session (admin logout control, ADR 0008): revokes the
    * linked device remotely when connected and closes the socket. The

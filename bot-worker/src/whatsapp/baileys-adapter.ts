@@ -26,6 +26,7 @@ import type {
   ParticipantsAction,
   RawContentKind,
   RawInboundMessage,
+  SessionCheckResult,
   WhatsAppAdapter,
 } from "./adapter.js";
 import { PAIRING_CODE_TTL_MS } from "./adapter.js";
@@ -911,6 +912,34 @@ export class BaileysAdapter implements WhatsAppAdapter {
         reason: errorReason(error),
       });
       return [];
+    }
+  }
+
+  /**
+   * Live session health probe: the socket must be open and a lightweight
+   * USync status query must succeed. Returns a safe code, never message
+   * content or credentials.
+   */
+  async checkSession(): Promise<SessionCheckResult> {
+    const socket = this.socket;
+    if (socket === null) {
+      return { ok: false, latencyMs: 0, error: "not_connected" };
+    }
+    const meJid = stringOrNull(socket.authState.creds.me?.id);
+    if (meJid === null) {
+      return { ok: false, latencyMs: 0, error: "not_authenticated" };
+    }
+    const started = Date.now();
+    try {
+      if (!socket.ws.isOpen) throw new Error("socket_closed");
+      await socket.fetchStatus(meJid);
+      return { ok: true, latencyMs: Date.now() - started, error: null };
+    } catch (error) {
+      return {
+        ok: false,
+        latencyMs: Date.now() - started,
+        error: errorReason(error).slice(0, 200),
+      };
     }
   }
 

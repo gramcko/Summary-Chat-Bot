@@ -53,6 +53,7 @@ describe("health and read-only status routes", () => {
       since: new Date().toISOString(),
       lastMessageAt: null,
       linking: null,
+      check: null,
     });
     await store.updateConnectionLinking({
       qr: "2@abc123pairingpayload",
@@ -75,6 +76,7 @@ describe("health and read-only status routes", () => {
       since: new Date().toISOString(),
       lastMessageAt: null,
       linking: null,
+      check: null,
     });
     const disconnected = await app.inject({
       method: "GET",
@@ -92,6 +94,7 @@ describe("health and read-only status routes", () => {
       since: new Date().toISOString(),
       lastMessageAt: null,
       linking: null,
+      check: null,
     });
     const connected = await app.inject({
       method: "GET",
@@ -106,6 +109,7 @@ describe("health and read-only status routes", () => {
       since: new Date().toISOString(),
       lastMessageAt: null,
       linking: null,
+      check: null,
     });
     await store.updateConnectionLinking({
       qr: "2@expired",
@@ -137,6 +141,7 @@ describe("health and read-only status routes", () => {
       since: new Date().toISOString(),
       lastMessageAt: null,
       linking: null,
+      check: null,
     });
     await store.updateConnectionLinking({
       kind: "pairing-code",
@@ -207,5 +212,29 @@ describe("health and read-only status routes", () => {
       headers: { cookie: session },
     });
     expect(after.statusCode).toBe(200);
+  });
+
+  it("requests a live session check and exposes the pending state", async () => {
+    const { app } = await makeApp();
+    await setupAdmin(app);
+    const session = await login(app);
+
+    const request = await app.inject({
+      method: "POST",
+      url: "/api/connection/test",
+      headers: { cookie: session },
+    });
+    expect(request.statusCode).toBe(202);
+    expect(request.json()).toEqual({ ok: true });
+
+    const status = await app.inject({
+      method: "GET",
+      url: "/api/connection",
+      headers: { cookie: session },
+    });
+    const parsed = ConnectionStatus.parse(status.json());
+    expect(parsed.check?.status).toBe("pending");
+    expect(parsed.check?.requestedAt).toBeTypeOf("string");
+    expect(parsed.check?.checkedAt).toBeNull();
   });
 });

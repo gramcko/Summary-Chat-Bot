@@ -290,4 +290,40 @@ describe("re-link after logout (CR-M1)", () => {
     await service.stop();
     await control.stop();
   });
+
+  it("performs a requested session check and records the result", async () => {
+    const h = harness();
+    h.db.requestSessionCheck();
+    h.adapter.sessionCheckResult = {
+      ok: true,
+      latencyMs: 23,
+      error: null,
+    };
+
+    const consumed = await h.control.runOnce();
+
+    expect(consumed).toBe(false);
+    expect(h.db.sessionCheckCheckedAt).not.toBeNull();
+    expect(h.db.sessionCheckOk).toBe(true);
+    expect(h.db.sessionCheckLatencyMs).toBe(23);
+    expect(h.db.sessionCheckError).toBeNull();
+    expect(findEvents(h.logs, "session_check_completed")).toHaveLength(1);
+    await h.control.stop();
+  });
+
+  it("records a failed session check", async () => {
+    const h = harness();
+    h.db.requestSessionCheck();
+    h.adapter.sessionCheckResult = {
+      ok: false,
+      latencyMs: 5,
+      error: "not_connected",
+    };
+
+    await h.control.runOnce();
+
+    expect(h.db.sessionCheckOk).toBe(false);
+    expect(h.db.sessionCheckError).toBe("not_connected");
+    await h.control.stop();
+  });
 });

@@ -305,6 +305,16 @@ export const api = {
     ).data;
   },
 
+  /**
+   * Requests a live WhatsApp session health check. The bot worker performs
+   * the probe; poll `connection()` for the pending/ok/failed result.
+   */
+  async testConnection(): Promise<OkResponse> {
+    return (
+      await requestRaw<OkResponse>("/connection/test", { method: "POST" })
+    ).data;
+  },
+
   groups(): Promise<Group[]> {
     return requestRaw<Group[]>("/groups").then((result) => result.data);
   },

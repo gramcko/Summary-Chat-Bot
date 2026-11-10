@@ -23,9 +23,7 @@ type IconName =
   | "settings"
   | "menu"
   | "close"
-  | "logout"
-  | "collapse"
-  | "expand";
+  | "logout";
 
 const ICON_PATHS: Record<IconName, ReactNode> = {
   overview: (
@@ -81,8 +79,6 @@ const ICON_PATHS: Record<IconName, ReactNode> = {
       <path d="M10 16l4-4-4-4M14 12H3" />
     </>
   ),
-  collapse: <path d="M15 6l-6 6 6 6" />,
-  expand: <path d="M9 6l6 6-6 6" />,
 };
 
 function Icon({ name, className = "" }: { name: IconName; className?: string }) {
@@ -136,11 +132,15 @@ function Brand({ compact = false }: { compact?: boolean }) {
 interface NavListProps {
   pathname: string;
   onNavigate?: () => void;
-  /** Icon-only desktop sidebar. */
-  collapsed?: boolean;
+  /** Desktop rail: labels are hidden until the sidebar is hovered/focused. */
+  hoverExpand?: boolean;
 }
 
-function NavList({ pathname, onNavigate, collapsed = false }: NavListProps) {
+function NavList({
+  pathname,
+  onNavigate,
+  hoverExpand = false,
+}: NavListProps) {
   return (
     <nav aria-label="Primary">
       <ul className="space-y-1">
@@ -151,11 +151,12 @@ function NavList({ pathname, onNavigate, collapsed = false }: NavListProps) {
               <Link
                 href={item.href}
                 aria-current={active ? "page" : undefined}
-                aria-label={collapsed ? item.label : undefined}
-                title={collapsed ? item.label : undefined}
+                title={item.label}
                 onClick={onNavigate}
-                className={`flex items-center rounded-lg text-sm font-medium transition-colors ${
-                  collapsed ? "justify-center px-2 py-2.5" : "gap-3 px-3 py-2"
+                className={`flex items-center rounded-lg text-sm font-medium transition-all duration-200 ${
+                  hoverExpand
+                    ? "justify-center gap-0 px-2 py-2.5 group-hover:justify-start group-hover:gap-3 group-hover:px-3 group-focus-within:justify-start group-focus-within:gap-3 group-focus-within:px-3"
+                    : "gap-3 px-3 py-2"
                 } ${
                   active
                     ? "bg-brand-50 text-brand-800"
@@ -166,7 +167,15 @@ function NavList({ pathname, onNavigate, collapsed = false }: NavListProps) {
                   name={item.icon}
                   className={active ? "text-brand-600" : "text-slate-400"}
                 />
-                {collapsed ? null : item.label}
+                <span
+                  className={
+                    hoverExpand
+                      ? "max-w-0 overflow-hidden whitespace-nowrap opacity-0 transition-[max-width,opacity] duration-200 group-hover:max-w-[12rem] group-hover:opacity-100 group-focus-within:max-w-[12rem] group-focus-within:opacity-100"
+                      : "whitespace-nowrap"
+                  }
+                >
+                  {item.label}
+                </span>
               </Link>
             </li>
           );
@@ -180,15 +189,15 @@ interface SignOutButtonProps {
   loading: boolean;
   onClick: () => void;
   className?: string;
-  /** Icon-only desktop sidebar. */
-  collapsed?: boolean;
+  /** Desktop rail: text is hidden until the sidebar is hovered/focused. */
+  hoverExpand?: boolean;
 }
 
 function SignOutButton({
   loading,
   onClick,
   className = "",
-  collapsed = false,
+  hoverExpand = false,
 }: SignOutButtonProps) {
   return (
     <Button
@@ -196,14 +205,23 @@ function SignOutButton({
       size="sm"
       loading={loading}
       onClick={onClick}
-      aria-label={collapsed ? "Sign out" : undefined}
-      title={collapsed ? "Sign out" : undefined}
-      className={`w-full text-slate-600 ${
-        collapsed ? "justify-center" : "justify-start gap-3"
+      title="Sign out"
+      className={`w-full text-slate-600 transition-all duration-200 ${
+        hoverExpand
+          ? "justify-center gap-0 px-2 group-hover:justify-start group-hover:gap-3 group-hover:px-3 group-focus-within:justify-start group-focus-within:gap-3 group-focus-within:px-3"
+          : "justify-start gap-3"
       } ${className}`}
     >
       {loading ? null : <Icon name="logout" className="text-slate-400" />}
-      {collapsed ? null : "Sign out"}
+      <span
+        className={
+          hoverExpand
+            ? "max-w-0 overflow-hidden whitespace-nowrap opacity-0 transition-[max-width,opacity] duration-200 group-hover:max-w-[12rem] group-hover:opacity-100 group-focus-within:max-w-[12rem] group-focus-within:opacity-100"
+            : "whitespace-nowrap"
+        }
+      >
+        Sign out
+      </span>
     </Button>
   );
 }
@@ -217,28 +235,6 @@ export function AppShell({ children }: { children: ReactNode }) {
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [loggingOut, setLoggingOut] = useState(false);
   const [logoutError, setLogoutError] = useState<string | null>(null);
-  const [collapsed, setCollapsed] = useState(false);
-
-  // Persist the desktop sidebar preference (mobile always uses the drawer).
-  useEffect(() => {
-    try {
-      setCollapsed(
-        window.localStorage.getItem("summarly.sidebar.collapsed") === "true",
-      );
-    } catch {
-      // Storage can be unavailable (private mode); keep expanded.
-    }
-  }, []);
-  useEffect(() => {
-    try {
-      window.localStorage.setItem(
-        "summarly.sidebar.collapsed",
-        String(collapsed),
-      );
-    } catch {
-      // Preference persistence is best-effort.
-    }
-  }, [collapsed]);
 
   // Close the mobile drawer whenever the route changes.
   useEffect(() => {
@@ -268,13 +264,7 @@ export function AppShell({ children }: { children: ReactNode }) {
 
   return (
     <NotificationProvider>
-      <div
-        className={`min-h-dvh lg:grid ${
-          collapsed
-            ? "lg:grid-cols-[4.5rem_minmax(0,1fr)]"
-            : "lg:grid-cols-[16rem_minmax(0,1fr)]"
-        }`}
-      >
+      <div className="min-h-dvh">
       <a
         href="#main"
         className="sr-only focus:not-sr-only focus:absolute focus:left-4 focus:top-3 focus:z-50 focus:rounded-lg focus:bg-white focus:px-3 focus:py-2 focus:text-sm focus:font-medium focus:text-brand-700 focus:shadow-raised"
@@ -282,56 +272,36 @@ export function AppShell({ children }: { children: ReactNode }) {
         Skip to main content
       </a>
 
-      {/* Desktop sidebar */}
-      <aside className="hidden border-r border-slate-200 bg-white lg:sticky lg:top-0 lg:flex lg:h-dvh lg:flex-col">
-        <div
-          className={`flex items-center py-4 ${
-            collapsed ? "justify-center px-2" : "justify-between gap-2 px-5"
-          }`}
-        >
-          {collapsed ? null : (
-            <Link href="/" className="rounded-lg">
-              <Brand />
-            </Link>
-          )}
-          <button
-            type="button"
-            onClick={() => setCollapsed((value) => !value)}
-            aria-label={collapsed ? "Expand sidebar" : "Collapse sidebar"}
-            aria-pressed={collapsed}
-            title={collapsed ? "Expand sidebar" : "Collapse sidebar"}
-            className="inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-lg text-slate-500 hover:bg-slate-100 hover:text-slate-800"
+      {/* Desktop sidebar: icon rail, expands on hover/focus with an overlay */}
+      <aside className="group fixed inset-y-0 left-0 z-30 hidden w-[4.5rem] flex-col overflow-hidden border-r border-slate-200 bg-white shadow-sm transition-[width,box-shadow] duration-200 ease-out hover:w-64 hover:shadow-raised focus-within:w-64 focus-within:shadow-raised lg:flex">
+        <div className="flex h-16 shrink-0 items-center overflow-hidden px-4">
+          <Link
+            href="/"
+            aria-label="Summarly home"
+            className="flex w-full items-center rounded-lg"
           >
-            <Icon name={collapsed ? "expand" : "collapse"} />
-          </button>
+            <span className="max-w-0 overflow-hidden whitespace-nowrap text-sm font-semibold text-slate-900 opacity-0 transition-[max-width,opacity] duration-200 group-hover:max-w-[12rem] group-hover:opacity-100 group-focus-within:max-w-[12rem] group-focus-within:opacity-100">
+              Summarly
+            </span>
+          </Link>
         </div>
-        <div
-          className={`flex-1 overflow-y-auto pb-4 ${
-            collapsed ? "px-2" : "px-3"
-          }`}
-        >
-          <NavList pathname={pathname} collapsed={collapsed} />
+        <div className="flex-1 overflow-y-auto px-2 pb-4 transition-[padding] duration-200 group-hover:px-3 group-focus-within:px-3">
+          <NavList pathname={pathname} hoverExpand />
         </div>
-        <div
-          className={`border-t border-slate-200 py-3 ${
-            collapsed ? "px-2" : "px-3"
-          }`}
-        >
+        <div className="border-t border-slate-200 px-2 py-3 transition-[padding] duration-200 group-hover:px-3 group-focus-within:px-3">
           <SignOutButton
             loading={loggingOut}
             onClick={() => void handleLogout()}
-            collapsed={collapsed}
+            hoverExpand
           />
-          {collapsed ? null : (
-            <p className="mt-2 px-3 text-[11px] leading-4 text-slate-400">
-              Self-hosted · administrator
-            </p>
-          )}
+          <p className="mt-2 max-h-0 overflow-hidden whitespace-nowrap px-3 text-[11px] leading-4 text-slate-400 opacity-0 transition-[max-height,opacity] duration-200 group-hover:max-h-8 group-hover:opacity-100 group-focus-within:max-h-8 group-focus-within:opacity-100">
+            Self-hosted · administrator
+          </p>
         </div>
       </aside>
 
       {/* Mobile header */}
-      <div className="flex min-w-0 flex-col">
+      <div className="flex min-w-0 flex-col lg:pl-[4.5rem]">
         <header className="sticky top-0 z-20 flex items-center justify-between gap-3 border-b border-slate-200 bg-white/95 px-4 py-3 backdrop-blur lg:hidden">
           <button
             type="button"
@@ -397,9 +367,7 @@ export function AppShell({ children }: { children: ReactNode }) {
       {logoutError === null || drawerOpen ? null : (
         <div
           role="alert"
-          className={`fixed bottom-4 left-4 right-4 z-40 rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm font-medium text-red-800 shadow-raised lg:right-auto lg:max-w-md ${
-            collapsed ? "lg:left-[5.5rem]" : "lg:left-[17rem]"
-          }`}
+          className="fixed bottom-4 left-4 right-4 z-40 rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm font-medium text-red-800 shadow-raised lg:left-[5.5rem] lg:right-auto lg:max-w-md"
         >
           Could not sign out: {logoutError}
         </div>

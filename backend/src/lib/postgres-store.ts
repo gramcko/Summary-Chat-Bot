@@ -100,6 +100,11 @@ type ConnectionRow = QueryResultRow & {
   linking_qr_expires_at: Date | null;
   linking_kind: string | null;
   logout_requested_at: Date | null;
+  session_check_requested_at: Date | null;
+  session_check_checked_at: Date | null;
+  session_check_ok: boolean | null;
+  session_check_latency_ms: number | null;
+  session_check_error: string | null;
 };
 
 type MemberRow = QueryResultRow & {
@@ -763,7 +768,9 @@ export class PostgresStore implements Store {
   async getConnectionStatus(): Promise<ConnectionStatus> {
     const result = await this.pool.query<ConnectionRow>(
       "SELECT state, since, last_message_at, linking_qr, " +
-        "linking_qr_expires_at, linking_kind, logout_requested_at " +
+        "linking_qr_expires_at, linking_kind, logout_requested_at, " +
+        "session_check_requested_at, session_check_checked_at, " +
+        "session_check_ok, session_check_latency_ms, session_check_error " +
         "FROM whatsapp_connections LIMIT 1",
     );
     const row = result.rows[0];
@@ -774,6 +781,7 @@ export class PostgresStore implements Store {
         since: nowIso(),
         lastMessageAt: null,
         linking: null,
+        check: null,
       });
     }
     // The RAW pairing payload (ADR 0008: `qr` is a live pairing ticket
@@ -793,12 +801,32 @@ export class PostgresStore implements Store {
     // Visibility gate (fix round A, audit M-4): served ONLY while the
     // session is being linked (connecting/disconnected) AND unexpired —
     // shared rule, InMemoryStore parity.
+    const requestedAt = row.session_check_requested_at;
+    const checkedAt = row.session_check_checked_at;
+    const pending =
+      requestedAt !== null &&
+      (checkedAt === null || checkedAt < requestedAt);
+    const check =
+      requestedAt === null
+        ? null
+        : {
+            status: pending
+              ? ("pending" as const)
+              : row.session_check_ok === true
+                ? ("ok" as const)
+                : ("failed" as const),
+            requestedAt: requestedAt.toISOString(),
+            checkedAt: checkedAt === null ? null : checkedAt.toISOString(),
+            latencyMs: row.session_check_latency_ms,
+            error: row.session_check_error,
+          };
     return ConnectionStatus.parse({
       state: row.state,
       since: row.since.toISOString(),
       lastMessageAt:
         row.last_message_at === null ? null : row.last_message_at.toISOString(),
       linking: servedLinking(row.state, rawLinking),
+      check,
     });
   }
 
@@ -816,6 +844,18 @@ export class PostgresStore implements Store {
          last_message_at = EXCLUDED.last_message_at,
          updated_at = now()`,
       [valid.state, new Date(valid.since), valid.lastMessageAt],
+    );
+  }
+
+  async requestSessionCheck(): Promise<void> {
+    await this.pool.query(
+      `UPDATE whatsapp_connections
+       SET session_check_requested_at = now(),
+           session_check_checked_at = NULL,
+           session_check_ok = NULL,
+           session_check_latency_ms = NULL,
+           session_check_error = NULL,
+           updated_at = now()`,
     );
   }
 
