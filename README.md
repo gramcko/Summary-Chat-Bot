@@ -27,7 +27,8 @@ Redis/BullMQ, and a Next.js dashboard.
 - **Search and filters** — groups and contacts can be searched/filtered.
 - **Live notifications** — toasts for summary requested/started/completed/
   failed, history-import requests, and contact renames.
-- **Collapsible sidebar** — icon-only rail on desktop, full labels when open.
+- **Collapsible sidebar** - icon-only rail on desktop, full labels when open;
+  clicking a navigation item collapses it again.
 - **History import** — bounded, best-effort backfill of older messages for a
   monitored group (WhatsApp decides what history is available).
 - **Default time zone setting** — used for new groups, as the initial value
@@ -116,7 +117,9 @@ WhatsApp on the **Connection** page (QR or pairing code).
    history.
 4. Open the group to see **Summaries**, **Members**, **Messages**, and
    **Settings**.
-5. Request a summary from **Summary runs** (or wait for the daily schedule).
+5. Request a summary from **Summary runs** (a group opened from its detail
+   page is preselected, and the period defaults to the group's latest
+   messages) or wait for the daily schedule.
 6. Use **Contacts** to see who participates in monitored groups and their
    cross-group messages.
 
