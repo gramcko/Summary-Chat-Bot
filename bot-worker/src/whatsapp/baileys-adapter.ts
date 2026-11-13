@@ -639,6 +639,8 @@ export function mapHistoryResponse(message: WAMessage): {
  */
 export interface HistorySetPayload {
   messages: WAMessage[];
+  /** Chats included in the payload (only the count is ever logged). */
+  chats?: readonly unknown[];
   contacts?: Array<{
     id?: string | null;
     jid?: string | null;
@@ -1150,6 +1152,16 @@ export class BaileysAdapter implements WhatsAppAdapter {
         reason: correlation,
       });
     }
+    // Diagnostic (info): an on-demand history notification actually
+    // reached the worker. Counts/booleans only — never message content
+    // and never chat JIDs (privacy boundary, ADR 0004/0007).
+    this.options.log("info", "history_notification_received", {
+      syncType: set.syncType ?? null,
+      hasSessionId: stringOrNull(set.peerDataRequestSessionId) !== null,
+      matched: correlation === "match",
+      messages: set.messages.length,
+      chats: set.chats?.length ?? 0,
+    });
     for (const event of mapHistorySet(
       set,
       this.pendingHistoryChats,
@@ -1339,6 +1351,16 @@ export class BaileysAdapter implements WhatsAppAdapter {
           (this.pendingHistoryChats.size === 1
             ? [...this.pendingHistoryChats][0]
             : undefined);
+        // Diagnostic (info): the phone answered the on-demand request.
+        // Without this line a `history_timeout` cannot be told apart from
+        // an unanswered request at LOG_LEVEL=info. The request id is
+        // deliberately NOT logged; a known chat becomes a hashed ref.
+        this.options.log("info", "history_pdo_response", {
+          kind: historyResponse.kind,
+          reason: historyResponse.reason,
+          matched: chatJid !== undefined,
+          ...(chatJid === undefined ? {} : { chatRef: safeChatRef(chatJid) }),
+        });
         if (chatJid !== undefined) {
           if (historyResponse.kind === "failure") {
             this.emit({

@@ -2,7 +2,7 @@
 
 import type { Group } from "@summarly/contracts";
 import Link from "next/link";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { GroupSettingsCard } from "./GroupSettingsCard";
 import { MembersTab } from "./MembersTab";
 import { MessagesTab } from "./MessagesTab";
@@ -14,7 +14,10 @@ import { EmptyState, ErrorState, PageHeader } from "@/components/ui/States";
 import { SkeletonCard } from "@/components/ui/Skeleton";
 import { Tabs, type TabDefinition } from "@/components/ui/Tabs";
 import { api } from "@/lib/api";
-import { summarizeHistoryImport } from "@/lib/history-import";
+import {
+  HISTORY_IMPORT_POLL_MS,
+  summarizeHistoryImport,
+} from "@/lib/history-import";
 import { useResource } from "@/lib/hooks";
 
 const TAB_ITEMS: readonly TabDefinition[] = [
@@ -31,6 +34,17 @@ export function GroupDetailView({ groupId }: { groupId: string }) {
   const current = group.data;
   const importSummary =
     current === null ? null : summarizeHistoryImport(current.historyImport);
+
+  // Keep the import banner and the Settings card live while the bot-worker is
+  // importing (same behavior as the groups list). Polling stops as soon as the
+  // import reports done/failed, so an idle page makes no extra requests.
+  const polling = importSummary?.inFlight === true;
+  const reload = group.reload;
+  useEffect(() => {
+    if (!polling) return;
+    const interval = window.setInterval(reload, HISTORY_IMPORT_POLL_MS);
+    return () => window.clearInterval(interval);
+  }, [polling, reload]);
 
   function handleSaved(updated: Group): void {
     group.setData(updated);

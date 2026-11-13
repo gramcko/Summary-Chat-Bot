@@ -8,12 +8,14 @@ import {
   FakeAdapter,
   FakeDb,
   findEvents,
+  logsContain,
   rawMessage,
   recordingLogger,
   sleep,
   waitFor,
   type LogEntry,
 } from "./fakes.js";
+import { safeChatRef } from "../src/lib/privacy.js";
 
 /**
  * History import (ADR 0007) with a fake adapter and fake database: no
@@ -140,7 +142,39 @@ describe("history import: claim → request → ingest → done", () => {
       groupId,
       status: "done",
       importedCount: 3,
+      // Diagnostics: the payload arrived; the phone sent no PDO answer.
+      sawHistoryNotification: true,
+      sawPdoResponse: false,
     });
+  });
+
+  it("logs history_request_sent at info with a hashed chat ref (diagnostics)", async () => {
+    const h = harness({ roundSettleMs: 20, roundTimeoutMs: 80 });
+    const groupId = seedImport(h.db);
+    scriptResponses(h.adapter, [
+      () =>
+        h.adapter.emitHistory(GROUP_A, [
+          rawMessage({ messageId: "H1", timestampSec: 300 }),
+        ]),
+    ]);
+
+    await h.service.runOnce();
+
+    const sent = findEvents(h.logs, "history_request_sent");
+    expect(sent.length).toBeGreaterThanOrEqual(1);
+    expect(sent[0]?.level).toBe("info");
+    expect(sent[0]?.fields).toMatchObject({
+      groupId,
+      chatRef: safeChatRef(GROUP_A),
+      round: 1,
+      count: 50,
+      cursorFromMe: false,
+    });
+    // The anchor's age is numeric; the seeded anchor is in the future,
+    // which yields a negative age (itself a useful diagnostic).
+    expect(typeof sent[0]?.fields["cursorAgeMs"]).toBe("number");
+    // Privacy: the raw chat JID never reaches the logs.
+    expect(logsContain(h.logs, GROUP_A)).toBe(false);
   });
 
   it("counts duplicate deliveries once (idempotent ingestion)", async () => {
@@ -448,6 +482,37 @@ describe("history import: failures and recovery", () => {
     expect(group?.historyError).toBe("history_timeout");
   });
 
+  it("warns history_round_timeout when a round ends with no answer (diagnostics)", async () => {
+    const h = harness({ roundTimeoutMs: 80 });
+    const groupId = seedImport(h.db);
+    scriptResponses(h.adapter, []); // request relayed, then silence
+
+    await h.service.runOnce();
+
+    const timeouts = findEvents(h.logs, "history_round_timeout");
+    expect(timeouts).toHaveLength(1);
+    expect(timeouts[0]?.level).toBe("warn");
+    expect(timeouts[0]?.fields).toMatchObject({
+      groupId,
+      chatRef: safeChatRef(GROUP_A),
+      round: 1,
+      gotAnyBatch: false,
+      importSuccess: false,
+      importFailure: null,
+    });
+    // The completion log says neither a PDO answer nor a notification
+    // ever arrived — the signature of a silent phone.
+    expect(
+      findEvents(h.logs, "history_import_completed")[0]?.fields,
+    ).toMatchObject({
+      status: "failed",
+      error: "history_timeout",
+      sawPdoResponse: false,
+      sawHistoryNotification: false,
+    });
+    expect(logsContain(h.logs, GROUP_A)).toBe(false);
+  });
+
   it("finishes as done with 0 when the phone reports success but no history", async () => {
     const h = harness({
       roundTimeoutMs: 100,
@@ -468,6 +533,15 @@ describe("history import: failures and recovery", () => {
     expect(group?.historyStatus).toBe("done");
     expect(group?.historyImportedCount).toBe(0);
     expect(group?.historyError).toBeNull();
+    // Diagnostics: the PDO answer arrived, the payload did not.
+    expect(
+      findEvents(h.logs, "history_import_completed")[0]?.fields,
+    ).toMatchObject({
+      sawPdoResponse: true,
+      sawHistoryNotification: false,
+    });
+    // A REQUEST_SUCCESS is not a silent round: no timeout warning.
+    expect(findEvents(h.logs, "history_round_timeout")).toHaveLength(0);
   });
 
   it("stops immediately when the phone reports a failure code", async () => {
@@ -491,6 +565,14 @@ describe("history import: failures and recovery", () => {
     expect(group?.historyStatus).toBe("failed");
     expect(group?.historyError).toBe("history_phone_offline");
     expect(h.adapter.historyRequests).toHaveLength(1);
+    // Diagnostics: the failure came from a PDO answer, not from silence.
+    expect(
+      findEvents(h.logs, "history_import_completed")[0]?.fields,
+    ).toMatchObject({
+      sawPdoResponse: true,
+      sawHistoryNotification: false,
+    });
+    expect(findEvents(h.logs, "history_round_timeout")).toHaveLength(0);
   });
 
   it("fails fast with history_no_anchor when the chat has no captured messages", async () => {    const h = harness();

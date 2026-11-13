@@ -230,6 +230,16 @@ never message content, JIDs, or names: `history_import_started`,
 `history_claims_requeued`, `history_buffer_overflow`, and the failure
 events with safe reasons.
 
+Info-level diagnostics (visible at the default `LOG_LEVEL=info`) make a
+silent phone distinguishable from an empty payload: `history_request_sent`
+per round (round, requested count, cursor `fromMe`/age),
+`history_pdo_response` (kind, safe reason, matched chat, hashed ref), and
+`history_notification_received` for on-demand payloads (sync type,
+session-id presence, matched, message/chat counts). A round that ends
+with no batch and no PDO answer logs the warn-level
+`history_round_timeout`, and `history_import_completed` reports the
+per-import `sawPdoResponse`/`sawHistoryNotification` booleans.
+
 ### Request correlation (log-only — SA-M3)
 
 History payloads are correlated to OUR peer-data requests by

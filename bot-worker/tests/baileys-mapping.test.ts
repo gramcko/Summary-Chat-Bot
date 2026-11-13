@@ -1,7 +1,10 @@
 import { describe, expect, it } from "vitest";
 import type { WAMessage } from "@whiskeysockets/baileys";
 import { isPhoneJid, normalizeJidAlias } from "../src/lib/jid.js";
+import { safeChatRef } from "../src/lib/privacy.js";
+import type { AdapterEvent } from "../src/whatsapp/adapter.js";
 import {
+  BaileysAdapter,
   classifyClose,
   classifyHistoryCorrelation,
   historyFailureFromResponseCode,
@@ -13,7 +16,14 @@ import {
   mapWAMessage,
   normalizeParticipantsAction,
   pairingFlowExpired,
+  type HistorySetPayload,
 } from "../src/whatsapp/baileys-adapter.js";
+import {
+  findEvents,
+  logsContain,
+  recordingLogger,
+  type LogEntry,
+} from "./fakes.js";
 
 /**
  * Baileys translation rules (ADR 0004). Importing the adapter also
@@ -692,5 +702,200 @@ describe("pairingFlowExpired (CR#6 pairing-code re-arm)", () => {
   it("releases the latch once the code is older than its TTL", () => {
     expect(pairingFlowExpired(now - 300_000, now, ttl)).toBe(true);
     expect(pairingFlowExpired(now - 400_000, now, ttl)).toBe(true);
+  });
+});
+
+/**
+ * History-import diagnostics (info-level). The adapter instance is driven
+ * through its private Baileys handlers with a recording logger: no
+ * socket, no session directory, and no WhatsApp account is involved.
+ */
+describe("history diagnostics (PDO response + notification logs)", () => {
+  const A = "111111111111-22222222@g.us";
+
+  interface AdapterInternals {
+    pendingHistoryChats: Set<string>;
+    pendingHistoryRequestIds: Map<string, string>;
+    onMessagesUpsert(upsert: { messages: WAMessage[]; type: string }): void;
+    onHistorySet(set: HistorySetPayload): void;
+  }
+
+  interface AdapterHarness {
+    internals: AdapterInternals;
+    logs: LogEntry[];
+    events: AdapterEvent[];
+  }
+
+  function harness(): AdapterHarness {
+    const logs: LogEntry[] = [];
+    const adapter = new BaileysAdapter({
+      sessionDir: "unused-in-unit-tests",
+      log: recordingLogger(logs),
+    });
+    const events: AdapterEvent[] = [];
+    adapter.subscribe((event) => events.push(event));
+    return {
+      internals: adapter as unknown as AdapterInternals,
+      logs,
+      events,
+    };
+  }
+
+  /** A PDO history response as the phone sends it back to us. */
+  function pdoResponse(requestId: string | null, responseCode: number): WAMessage {
+    return wa({
+      key: {
+        remoteJid: "1234567890@s.whatsapp.net",
+        fromMe: true,
+        id: "PDO-MSG-1",
+      },
+      message: {
+        protocolMessage: {
+          peerDataOperationRequestResponseMessage: {
+            ...(requestId === null ? {} : { stanzaId: requestId }),
+            peerDataOperationResult: [
+              { fullHistorySyncOnDemandRequestResponse: { responseCode } },
+            ],
+          },
+        },
+      },
+    });
+  }
+
+  const historyMessage = (chatJid: string, id: string): WAMessage =>
+    wa({
+      key: {
+        remoteJid: chatJid,
+        fromMe: false,
+        id,
+        participant: "sender@s.whatsapp.net",
+      },
+      messageTimestamp: 1000,
+      message: { conversation: `text-${id}` },
+    });
+
+  it("logs a matched PDO success with a hashed chat ref and no request id", () => {
+    const h = harness();
+    h.internals.pendingHistoryChats.add(A);
+    h.internals.pendingHistoryRequestIds.set("req-secret-1", A);
+
+    h.internals.onMessagesUpsert({
+      messages: [pdoResponse("req-secret-1", 0)],
+      type: "notify",
+    });
+
+    const entries = findEvents(h.logs, "history_pdo_response");
+    expect(entries).toHaveLength(1);
+    expect(entries[0]?.level).toBe("info");
+    expect(entries[0]?.fields).toEqual({
+      kind: "success",
+      reason: null,
+      matched: true,
+      chatRef: safeChatRef(A),
+    });
+    // Neither the request id nor the raw chat JID is ever logged.
+    expect(logsContain(h.logs, "req-secret-1")).toBe(false);
+    expect(logsContain(h.logs, A)).toBe(false);
+    // The service still receives the success event.
+    expect(h.events).toContainEqual({ type: "history-success", chatJid: A });
+  });
+
+  it("logs a matched PDO failure with its safe reason", () => {
+    const h = harness();
+    h.internals.pendingHistoryChats.add(A);
+    h.internals.pendingHistoryRequestIds.set("req-secret-2", A);
+
+    h.internals.onMessagesUpsert({
+      messages: [pdoResponse("req-secret-2", 5)],
+      type: "notify",
+    });
+
+    expect(findEvents(h.logs, "history_pdo_response")[0]?.fields).toEqual({
+      kind: "failure",
+      reason: "history_phone_offline",
+      matched: true,
+      chatRef: safeChatRef(A),
+    });
+    expect(h.events).toContainEqual({
+      type: "history-error",
+      chatJid: A,
+      reason: "history_phone_offline",
+    });
+  });
+
+  it("logs an unmatched PDO response without any chat field", () => {
+    const h = harness(); // no outstanding request: nothing to attribute it to
+
+    h.internals.onMessagesUpsert({
+      messages: [pdoResponse(null, 0)],
+      type: "notify",
+    });
+
+    const entry = findEvents(h.logs, "history_pdo_response")[0];
+    expect(entry?.level).toBe("info");
+    expect(entry?.fields).toEqual({
+      kind: "success",
+      reason: null,
+      matched: false,
+    });
+    expect(entry?.fields).not.toHaveProperty("chatRef");
+    expect(h.events.some((event) => event.type === "history-success")).toBe(
+      false,
+    );
+  });
+
+  it("logs an on-demand notification with counts and keeps the unverified warning", () => {
+    const h = harness();
+    h.internals.pendingHistoryChats.add(A);
+
+    h.internals.onHistorySet({
+      messages: [historyMessage(A, "M1")],
+      chats: [{ id: A }],
+      syncType: 6, // ON_DEMAND
+      peerDataRequestSessionId: null,
+    });
+
+    const entries = findEvents(h.logs, "history_notification_received");
+    expect(entries).toHaveLength(1);
+    expect(entries[0]?.level).toBe("info");
+    expect(entries[0]?.fields).toEqual({
+      syncType: 6,
+      hasSessionId: false,
+      matched: false,
+      messages: 1,
+      chats: 1,
+    });
+    // The existing correlation warning is preserved (log-only, SA-M3).
+    expect(findEvents(h.logs, "history_payload_unverified")[0]?.fields).toEqual(
+      { reason: "missing-session-id" },
+    );
+    // Privacy: no chat JID and no message body in any line.
+    expect(logsContain(h.logs, A)).toBe(false);
+    expect(logsContain(h.logs, "text-M1")).toBe(false);
+  });
+
+  it("marks a notification matched when WhatsApp echoes our request id", () => {
+    const h = harness();
+    h.internals.pendingHistoryChats.add(A);
+    h.internals.pendingHistoryRequestIds.set("req-echoed", A);
+
+    h.internals.onHistorySet({
+      messages: [historyMessage(A, "M1")],
+      syncType: 6,
+      peerDataRequestSessionId: "req-echoed",
+    });
+
+    expect(findEvents(h.logs, "history_notification_received")[0]?.fields).toEqual(
+      {
+        syncType: 6,
+        hasSessionId: true,
+        matched: true,
+        messages: 1,
+        chats: 0,
+      },
+    );
+    // A matched payload needs no unverified warning.
+    expect(findEvents(h.logs, "history_payload_unverified")).toHaveLength(0);
+    expect(logsContain(h.logs, "req-echoed")).toBe(false);
   });
 });

@@ -39,6 +39,12 @@ export interface ConfirmDialogProps {
  * cannot be dismissed: the cancel button is disabled, backdrop clicks are
  * ignored, and the native `cancel` event (Escape) is prevented — this prevents
  * a request from being fired twice or its error being lost with the dialog.
+ *
+ * Centering: the UA stylesheet centers a modal dialog with `inset: 0` plus
+ * `margin: auto`, but Tailwind Preflight resets `margin` to 0, which leaves the
+ * dialog in the top-left corner. `inset-0 m-auto` restores that centering
+ * explicitly, and `max-h`/`overflow-y-auto` keep tall dialogs usable on small
+ * screens instead of overflowing the viewport.
  */
 export function ConfirmDialog({
   open,
@@ -106,7 +112,7 @@ export function ConfirmDialog({
       aria-labelledby={titleId}
       aria-describedby={descriptionId}
       onClick={handleBackdropClick}
-      className="w-[min(92vw,28rem)] rounded-xl border border-slate-200 bg-white p-0 text-slate-900 shadow-xl backdrop:bg-slate-900/50"
+      className="inset-0 m-auto max-h-[calc(100dvh-2rem)] w-[min(92vw,28rem)] overflow-y-auto rounded-xl border border-slate-200 bg-white p-0 text-slate-900 shadow-xl backdrop:bg-slate-900/50"
     >
       <div className="px-5 py-4">
         <h2 id={titleId} className="text-base font-semibold">

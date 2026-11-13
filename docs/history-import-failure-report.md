@@ -190,7 +190,14 @@ Implemented mitigations:
 3. A phone `REQUEST_SUCCESS` with no history payload now finishes as
    `done` with 0 imported instead of `history_timeout`.
 4. Safe diagnostics were added for initial-sync drops/captures and
-   success-without-payload; no message content is logged.
+   success-without-payload; no message content is logged. The import path
+   now also logs `history_request_sent` (round, count, cursor age),
+   `history_pdo_response` (kind, safe reason, matched), and
+   `history_notification_received` (sync type, counts) at info level, a
+   warn-level `history_round_timeout` when a round is silent, and
+   `sawPdoResponse`/`sawHistoryNotification` booleans on
+   `history_import_completed` — so a silent phone is distinguishable at
+   `LOG_LEVEL=info` without raising the level to debug.
 
 If `full` still imports nothing after a re-link, the remaining causes are
 phone/account-side (primary offline, account type unsupported, or WhatsApp

@@ -146,6 +146,15 @@ export class HistoryImportService {
   private importFailure: HistoryFailureReason | null = null;
   /** REQUEST_SUCCESS seen for the active request (no payload yet). */
   private importSuccess = false;
+  /**
+   * Diagnostics for the active import: the phone answered with a PDO
+   * success/failure (or not), and an on-demand history notification
+   * arrived (or not). Counted per import and reported on completion so
+   * an operator at LOG_LEVEL=info can tell a silent phone apart from a
+   * payload that was received but empty.
+   */
+  private sawPdoResponse = false;
+  private sawHistoryNotification = false;
   /** Bumps on every received history batch (settle tracking). */
   private activityVersion = 0;
   private wake: (() => void) | null = null;
@@ -213,6 +222,7 @@ export class HistoryImportService {
       // The phone explicitly refused/failed the request: stop waiting.
       if (this.importChat !== event.chatJid) return;
       this.importFailure = event.reason;
+      this.sawPdoResponse = true;
       this.wakeNow();
       return;
     }
@@ -223,6 +233,7 @@ export class HistoryImportService {
       // collectRoundBatch still gives the payload a short grace window.
       if (this.importChat !== event.chatJid) return;
       this.importSuccess = true;
+      this.sawPdoResponse = true;
       this.wakeNow();
       return;
     }
@@ -230,6 +241,9 @@ export class HistoryImportService {
     // Ignore stale/foreign batches (ADR 0007): only the chat currently
     // being imported is collected; events after completion are dropped.
     if (this.importChat !== event.chatJid) return;
+    // Diagnostics: an on-demand payload for the active chat arrived (the
+    // connect-time "initial" sync is never part of an import).
+    if (event.origin === "on-demand") this.sawHistoryNotification = true;
     // Bounded buffer (SA-L4): at most maxMessages*2 messages may be
     // held for the round; overflow drops the NEWEST with a counted log.
     const cap = this.budgets.maxMessages * 2;
@@ -335,6 +349,8 @@ export class HistoryImportService {
     this.importBuffer = [];
     this.importFailure = null;
     this.importSuccess = false;
+    this.sawPdoResponse = false;
+    this.sawHistoryNotification = false;
     this.activityVersion = 0;
 
     const chatRef = safeChatRef(claim.chatJid);
@@ -400,6 +416,22 @@ export class HistoryImportService {
         this.importSuccess = false;
         const startVersion = this.activityVersion;
 
+        // Diagnostic (info): at LOG_LEVEL=info an operator must be able to
+        // tell whether the request even went out and which anchor it paged
+        // backwards from. Only safe values: the anchor age, never a JID.
+        this.log("info", "history_request_sent", {
+          groupId: claim.groupId,
+          chatRef,
+          round: rounds,
+          count: budgets.batchCount,
+          cursorFromMe: oldest?.fromMe ?? null,
+          // A NEGATIVE age means the anchor timestamp lies in the future
+          // (clock skew or bad data) — kept as-is because that is exactly
+          // the diagnostic worth seeing.
+          cursorAgeMs:
+            oldest === null ? null : this.now() - oldest.timestampSec * 1000,
+        });
+
         try {
           await this.adapter.requestHistory({
             chatJid: claim.chatJid,
@@ -438,8 +470,22 @@ export class HistoryImportService {
               chatRef,
               round: rounds,
             });
-          } else if (!gotAnyBatch) {
-            failure = "history_timeout";
+          } else {
+            // Diagnostics (warn): the round ended with no batch AND no
+            // PDO answer — the silent-phone case behind `history_timeout`.
+            // importFailure is always null here (a reported failure
+            // already broke out above); it is logged for clarity.
+            if (this.importFailure === null) {
+              this.log("warn", "history_round_timeout", {
+                groupId: claim.groupId,
+                chatRef,
+                round: rounds,
+                gotAnyBatch,
+                importSuccess: this.importSuccess,
+                importFailure: this.importFailure,
+              });
+            }
+            if (!gotAnyBatch) failure = "history_timeout";
           }
           break;
         }
@@ -537,6 +583,10 @@ export class HistoryImportService {
         collected,
         error: outcome.error,
         completed,
+        // Diagnostics: distinguishes "the phone never answered" from
+        // "the payload arrived but carried nothing usable".
+        sawPdoResponse: this.sawPdoResponse,
+        sawHistoryNotification: this.sawHistoryNotification,
       });
     } catch (error) {
       // Unexpected failure (e.g. the database write): report 'failed'
