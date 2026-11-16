@@ -120,6 +120,14 @@ export class CaptureService {
   private attempt = 0;
   private stopped = true;
   private sessionLost = false;
+  /**
+   * Last known persistent "session has opened at least once" flag
+   * (migration 0015, ADR 0007). Reloaded from PostgreSQL before every
+   * connect; set to true after `connection: open`; reset by
+   * `beginLogout` (logout/reset clears the DB flag via
+   * `finalizeLogout`). Gates the Desktop preset + `syncFullHistory`.
+   */
+  private established = false;
   /** Admin logout in progress: no state writes, no reconnects (ADR 0008). */
   private loggingOut = false;
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
@@ -201,6 +209,11 @@ export class CaptureService {
   beginLogout(): void {
     this.loggingOut = true;
     this.sessionLost = true;
+    // The linked session is being torn down: the DB flag is cleared by
+    // `finalizeLogout`, and the in-memory flag must not leak into the
+    // next link (a re-arm reloads it in `doConnect` anyway).
+    this.established = false;
+    this.adapter.setSessionEstablished(false);
     if (this.reconnectTimer !== null) {
       clearTimeout(this.reconnectTimer);
       this.reconnectTimer = null;
@@ -276,6 +289,7 @@ export class CaptureService {
       case "open":
         this.attempt = 0;
         await this.setStatus("connected");
+        await this.markEstablished();
         // Linking finished: the pairing ticket must not linger (ADR 0008).
         await this.clearLinking();
         await this.runDiscovery();
@@ -325,6 +339,12 @@ export class CaptureService {
       this.sessionLost = true;
       await this.setStatus("lost-logged-out");
       await this.clearLinking();
+      // The session is no longer valid, so it can never be reused: clear
+      // the persistent "opened once" flag too. Without this, an operator
+      // who removes the session files and re-links manually (instead of
+      // using the reset control) would send the first post-scan
+      // reconnect into the same 428 loop (ADR 0007, migration 0015).
+      await this.clearEstablished();
       this.log("error", "session_lost_relink_required", {
         reason: event.reason,
         note:
@@ -363,6 +383,7 @@ export class CaptureService {
     // was in flight — do not open a connection after shutdown.
     if (this.stopped || this.sessionLost) return;
     try {
+      await this.loadSessionEstablished();
       await this.refreshHistoryCaptureChats();
       await this.adapter.connect();
     } catch (error) {
@@ -379,6 +400,73 @@ export class CaptureService {
       } catch {
         // Already closed; nothing to release.
       }
+    }
+  }
+
+  /**
+   * Reloads the persistent "session has opened at least once" flag
+   * (migration 0015, ADR 0007) and hands it to the adapter BEFORE the
+   * socket is created. This is what makes the first reconnect after the
+   * QR scan use the registration-safe history config: `creds.me` already
+   * exists at that point, but the session has never reached `open`.
+   * A read failure is non-fatal: the adapter keeps its last value (false
+   * by default = the safe config).
+   */
+  private async loadSessionEstablished(): Promise<void> {
+    try {
+      const established = await this.db.getSessionEstablished();
+      this.established = established;
+      this.adapter.setSessionEstablished(established);
+    } catch (error) {
+      this.log("warn", "session_established_read_failed", {
+        reason: safeReason(error),
+      });
+    }
+  }
+
+  /**
+   * Persists and propagates "the session has opened at least once"
+   * (migration 0015, ADR 0007). Logged once per transition only; a
+   * persistence failure is non-fatal (the in-memory flag still lets this
+   * process reconnect with the full-history config, and the next
+   * successful open rewrites it).
+   */
+  private async markEstablished(): Promise<void> {
+    const transition = !this.established;
+    this.established = true;
+    this.adapter.setSessionEstablished(true);
+    if (transition) {
+      this.log("info", "session_established", { established: true });
+    }
+    if (this.connectionId === null) return;
+    // Idempotent write on every open (cheap, once per connection): it
+    // also repairs a write that failed on an earlier open.
+    try {
+      await this.db.markSessionEstablished(this.connectionId, true);
+    } catch (error) {
+      this.log("warn", "session_established_write_failed", {
+        reason: safeReason(error),
+      });
+    }
+  }
+
+  /**
+   * Clears the persistent "session has opened at least once" flag
+   * (migration 0015) and the adapter's copy. Used when the session is
+   * known to be gone: a terminal close (revoked/replaced/corrupt) or an
+   * admin logout/reset. Errors are non-fatal: the safe default (false)
+   * only makes the next connect use the registration-safe config.
+   */
+  private async clearEstablished(): Promise<void> {
+    this.established = false;
+    this.adapter.setSessionEstablished(false);
+    if (this.connectionId === null) return;
+    try {
+      await this.db.markSessionEstablished(this.connectionId, false);
+    } catch (error) {
+      this.log("warn", "session_established_write_failed", {
+        reason: safeReason(error),
+      });
     }
   }
 

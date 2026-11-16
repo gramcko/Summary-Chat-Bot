@@ -20,6 +20,11 @@ export interface ConfirmDialogProps {
   /** Spinner/disable state for the confirm action. */
   loading?: boolean;
   /**
+   * Extra guard for the confirm action (for example "the typed confirmation
+   * does not match yet"). Disables the button without touching `loading`.
+   */
+  confirmDisabled?: boolean;
+  /**
    * Optional third choice rendered between "Cancel" and the confirm action
    * (for example "Monitor only" next to "Monitor & import history").
    */
@@ -54,6 +59,7 @@ export function ConfirmDialog({
   cancelLabel = "Cancel",
   tone = "danger",
   loading = false,
+  confirmDisabled = false,
   alternativeLabel,
   onAlternative,
   alternativeLoading = false,
@@ -144,7 +150,7 @@ export function ConfirmDialog({
             variant={tone === "danger" ? "danger" : "primary"}
             onClick={onConfirm}
             loading={loading}
-            disabled={alternativeLoading}
+            disabled={alternativeLoading || confirmDisabled}
           >
             {confirmLabel}
           </Button>

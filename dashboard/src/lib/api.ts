@@ -1,5 +1,7 @@
 import type {
   ApiMessagePage,
+  AssistantChatRequest,
+  AssistantChatResponse,
   ConnectionStatus,
   ContactDetail,
   ContactMessagePage,
@@ -9,6 +11,8 @@ import type {
   CreateRunRequest,
   DefaultDateFormatSettings,
   DefaultTimezoneSettings,
+  DeleteAllDataRequest,
+  DeleteAllDataResponse,
   ErrorCode,
   ErrorDetail,
   Group,
@@ -316,6 +320,19 @@ export const api = {
     ).data;
   },
 
+  /**
+   * Deletes the *local* WhatsApp session credentials and QR/linking state
+   * without a remote logout, then re-arms a fresh QR code. Used when the
+   * stored session is partial/invalid and no QR appears. Captured groups,
+   * messages, summaries, and settings are kept. Idempotent: `202` whether or
+   * not a request was already pending.
+   */
+  async resetConnection(): Promise<OkResponse> {
+    return (
+      await requestRaw<OkResponse>("/connection/reset", { method: "POST" })
+    ).data;
+  },
+
   groups(): Promise<Group[]> {
     return requestRaw<Group[]>("/groups").then((result) => result.data);
   },
@@ -421,6 +438,22 @@ export const api = {
     return { group: result.data, accepted: result.status === 202 };
   },
 
+  /**
+   * Asks the bot worker for a fresh roster snapshot of a monitored group
+   * (ADR 0008). `202 {"ok": true}` only records the request: the worker
+   * performs the sync, so the client polls `groupMembers` until the roster
+   * changes. `409` means the group is not monitored (rosters are
+   * monitored-only), `404` an unknown group.
+   */
+  async requestRosterSync(id: string): Promise<OkResponse> {
+    return (
+      await requestRaw<OkResponse>(
+        `/groups/${encodeURIComponent(id)}/roster-sync`,
+        { method: "POST" },
+      )
+    ).data;
+  },
+
   runs(): Promise<RunListResponse> {
     return requestRaw<RunListResponse>("/summary-runs").then(
       (result) => result.data,
@@ -524,5 +557,34 @@ export const api = {
       "/settings/default-date-format",
       { method: "PUT", body },
     ).then((result) => result.data);
+  },
+
+  /**
+   * Dashboard assistant (`POST /api/assistant/chat`). The backend is
+   * deterministic and only reads monitored data; the client sends at most
+   * 20 conversation turns (oldest first) and gets a plain-text reply with
+   * citations back. Rate limited per IP, so `429` is a normal outcome.
+   */
+  assistantChat(body: AssistantChatRequest): Promise<AssistantChatResponse> {
+    return requestRaw<AssistantChatResponse>("/assistant/chat", {
+      method: "POST",
+      body,
+    }).then((result) => result.data);
+  },
+
+  /**
+   * Danger zone: delete every captured conversation artifact (groups,
+   * messages, summary runs, summaries, group members, contact overrides).
+   *
+   * Administrative state — admin login, app settings, the AI provider key,
+   * the WhatsApp connection/session, and the database itself — is kept. The
+   * request must carry the exact `confirmation: "DELETE ALL"` literal; the
+   * backend answers `400 validation_error` for anything else.
+   */
+  deleteAllData(body: DeleteAllDataRequest): Promise<DeleteAllDataResponse> {
+    return requestRaw<DeleteAllDataResponse>("/admin/delete-all-data", {
+      method: "POST",
+      body,
+    }).then((result) => result.data);
   },
 };

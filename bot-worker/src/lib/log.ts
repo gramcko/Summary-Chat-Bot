@@ -8,6 +8,9 @@
  * identifiers (JIDs, message ids), counts, codes, durations, or other
  * safe metadata only.
  */
+import { appendFileSync, mkdirSync } from "node:fs";
+import { dirname } from "node:path";
+
 export type LogLevel = "debug" | "info" | "warn" | "error";
 
 export type LogFields = Record<string, string | number | boolean | null>;
@@ -29,7 +32,44 @@ export function isLogLevel(value: string): value is LogLevel {
   return value === "debug" || value === "info" || value === "warn" || value === "error";
 }
 
-export function createLogger(service: string, minLevel: LogLevel = "info"): Logger {
+/**
+ * Builds a best-effort appender for an optional log file (LOG_FILE).
+ *
+ * The parent directory is created recursively ONCE, here, and every
+ * failure is swallowed: the file sink is a diagnostic convenience and
+ * must never crash or degrade the worker (logging stays functional on
+ * stdout/stderr). The path is never logged — it is operational
+ * configuration, and a path can leak deployment details.
+ */
+function openFileSink(filePath: string): (line: string) => void {
+  try {
+    mkdirSync(dirname(filePath), { recursive: true });
+  } catch {
+    // Unusable directory: appends below will fail quietly instead.
+  }
+  return (line: string): void => {
+    try {
+      appendFileSync(filePath, line, "utf8");
+    } catch {
+      // Best effort only (disk full, permissions, rotated away...).
+    }
+  };
+}
+
+/**
+ * Creates a JSON-lines logger. With `filePath` (LOG_FILE) each emitted
+ * line is ALSO appended to that file, byte-identical to the console
+ * line, after level filtering — so the file never contains more than
+ * the process prints. Both sinks are best-effort.
+ */
+export function createLogger(
+  service: string,
+  minLevel: LogLevel = "info",
+  filePath?: string,
+): Logger {
+  const target = filePath?.trim();
+  const sink =
+    target === undefined || target === "" ? null : openFileSink(target);
   return (level, event, fields) => {
     if (LEVEL_ORDER[level] < LEVEL_ORDER[minLevel]) return;
     const record = {
@@ -45,6 +85,7 @@ export function createLogger(service: string, minLevel: LogLevel = "info"): Logg
     } else {
       process.stderr.write(line);
     }
+    sink?.(line);
   };
 }
 

@@ -8,6 +8,7 @@ import {
   type ContactMessage,
   type ContactSummary,
   type DateFormat,
+  type DeleteAllDataCounts,
   type Group,
   type GroupMember,
   type GroupSummary,
@@ -64,6 +65,39 @@ export interface ListMessagesOptions {
   cursor?: string;
 }
 
+/**
+ * Cross-group message search (assistant `search_messages` intent). Every
+ * filter is optional; `limit` is required so no caller can ask for an
+ * unbounded result set.
+ *
+ * - `groupId` scopes the search to one MONITORED group.
+ * - `senderAliases` are a contact's JID forms (LID/PN); device suffixes
+ *   on stored sender ids are normalized before matching.
+ * - `text` matches case-insensitively by substring OR by trigram
+ *   similarity (pg_trgm `similarity(...) > 0.15`), so typos and word
+ *   order still find the message.
+ * - `from`/`to` are a half-open instant range [from, to).
+ */
+export interface MessageSearchOptions {
+  groupId?: string;
+  senderAliases?: string[];
+  text?: string;
+  from?: string;
+  to?: string;
+  limit: number;
+}
+
+/** One search hit: the message plus the monitored group it came from. */
+export interface MessageSearchHit {
+  id: string;
+  groupId: string;
+  groupName: string;
+  sentAt: string;
+  senderId: string;
+  senderName: string | null;
+  body: string;
+}
+
 /** Cursor = `<sentAt ISO>|<message id>`; undefined when invalid. */
 export function decodeMessageCursor(
   cursor: string,
@@ -115,6 +149,48 @@ export function runIdentity(input: CreateRunInput): string {
 
 export function nowIso(): string {
   return new Date().toISOString();
+}
+
+/**
+ * Sender JIDs are compared without their WhatsApp device suffix:
+ * `111:4@s.whatsapp.net` and `111@s.whatsapp.net` are the same person.
+ * Mirrors the SQL `regexp_replace(m.sender_id, ':.*@', '@')`.
+ */
+function normalizeSenderJid(jid: string): string {
+  return jid.replace(/:.*@/, "@");
+}
+
+/**
+ * pg_trgm-compatible trigram set: each word is padded with two leading
+ * and one trailing space, then every 3-character slice is a trigram.
+ * Used only by the in-memory store so its fuzzy matching behaves like
+ * the SQL `similarity(...)` (pg_trgm) the Postgres store relies on.
+ */
+function trigrams(value: string): Set<string> {
+  const result = new Set<string>();
+  const words = value
+    .toLowerCase()
+    .split(/[^\p{L}\p{N}]+/u)
+    .filter((word) => word.length > 0);
+  for (const word of words) {
+    const padded = `  ${word} `;
+    for (let index = 0; index + 3 <= padded.length; index += 1) {
+      result.add(padded.slice(index, index + 3));
+    }
+  }
+  return result;
+}
+
+/** Trigram Jaccard similarity (0..1), matching pg_trgm's definition. */
+function trigramSimilarity(left: string, right: string): number {
+  const a = trigrams(left);
+  const b = trigrams(right);
+  if (a.size === 0 || b.size === 0) return 0;
+  let shared = 0;
+  for (const gram of a) {
+    if (b.has(gram)) shared += 1;
+  }
+  return shared / (a.size + b.size - shared);
 }
 
 /**
@@ -207,6 +283,16 @@ export interface Store {
    * un-monitored group's consent to import history is revoked).
    */
   cancelPendingHistoryImport(groupId: string): Promise<boolean>;
+  /**
+   * Records an on-demand roster sync request for the group (migration
+   * 0016): sets `roster_sync_requested_at` and the bot-worker consumes it
+   * on its session-control poll (fetch group metadata + sync the roster).
+   * Best-effort by design — a refresh may still come back empty (WhatsApp
+   * metadata unavailable). Only MONITORED groups are ever matched, so
+   * un-monitoring revokes a pending request. Unknown/unmonitored ids are a
+   * silent no-op; the ROUTE enforces 404/409.
+   */
+  requestGroupRosterSync(groupId: string): Promise<void>;
 
   // ---- Group detail data (ADR 0008) ----
   /**
@@ -219,7 +305,11 @@ export interface Store {
     chatId: string,
     members: GroupMemberInput[],
   ): Promise<void>;
-  /** Members of a chat, admin names first then alphabetical. */
+  /**
+   * Members of a chat, admin names first then alphabetical. The `name`
+   * follows the display-name precedence: admin contact override, then
+   * roster name, then the newest push name captured for that sender.
+   */
   listGroupMembers(chatId: string): Promise<GroupMember[]>;
   /**
    * Captured messages of a chat for the admin chat view: newest first
@@ -257,6 +347,12 @@ export interface Store {
     aliases: readonly string[],
     options: ListMessagesOptions,
   ): Promise<ContactMessage[]>;
+  /**
+   * Search captured messages across MONITORED groups (assistant MVP).
+   * Unmonitored groups are never searched, and rows are ordered by
+   * similarity (when `text` is present) then newest first. Read-only.
+   */
+  searchMessages(options: MessageSearchOptions): Promise<MessageSearchHit[]>;
   /**
    * Past summaries of a GROUP (summary runs join by group id — a group
    * without a discovered chat can still have scheduled runs), newest
@@ -310,6 +406,19 @@ export interface Store {
   getDefaultDateFormat(): Promise<DateFormat>;
   setDefaultDateFormat(dateFormat: DateFormat): Promise<DateFormat>;
 
+  // ---- Guarded data deletion (danger zone) ----
+  /**
+   * Deletes ALL captured data in one transaction: summaries,
+   * summary runs, messages, the group roster, contact overrides, and
+   * groups. Also clears `whatsapp_connections.last_message_at`.
+   *
+   * Deliberately KEPT: app settings, AI provider configuration, admin
+   * credentials, admin sessions, the WhatsApp connection row/state, and
+   * the Baileys session directory (nothing here touches the session).
+   * Returns the exact number of rows removed per table.
+   */
+  deleteAllData(): Promise<DeleteAllDataCounts>;
+
   // ---- WhatsApp connection status (non-secret) ----
   getConnectionStatus(): Promise<ConnectionStatus>;
   setConnectionStatus(status: ConnectionStatus): Promise<void>;
@@ -340,6 +449,16 @@ export interface Store {
    * flag and clears it via {@link clearLogoutRequest}.
    */
   requestLogout(): Promise<void>;
+  /**
+   * Records the admin's "delete connection data" request
+   * (session_reset_requested_at = now()). LOCAL-ONLY: the bot-worker
+   * purges the local session directory and re-arms linking so a fresh QR
+   * appears; the linked device is NOT revoked remotely and captured
+   * data/settings are untouched. Idempotent: an already-pending request
+   * keeps its original timestamp. The flag is never exposed in
+   * {@link ConnectionStatus} — the dashboard polls normal status.
+   */
+  requestSessionReset(): Promise<void>;
   /** Clears the consumed logout request (bot-worker side). */
   clearLogoutRequest(): Promise<void>;
 }
@@ -371,6 +490,9 @@ export class InMemoryStore implements Store {
     check: null,
   };
   private logoutRequestedAt: string | null = null;
+  private sessionResetRequestedAt: string | null = null;
+  /** Group ids with a pending on-demand roster sync (migration 0016). */
+  private readonly rosterSyncRequested = new Set<string>();
   private readonly members = new Map<string, Map<string, GroupMember>>();
   private readonly messageLog: ApiMessage[] = [];
   /** Admin display-name overrides keyed by canonical contact id. */
@@ -507,6 +629,22 @@ export class InMemoryStore implements Store {
     return true;
   }
 
+  async requestGroupRosterSync(groupId: string): Promise<void> {
+    // Parity with the SQL (`AND monitored = true`): an unmonitored or
+    // unknown group never gets a request recorded.
+    if (this.groups.get(groupId)?.monitored !== true) return;
+    this.rosterSyncRequested.add(groupId);
+  }
+
+  /**
+   * Test/diagnostic accessor (NOT part of {@link Store}): group ids with
+   * a pending roster-sync request. Lets route/store tests assert that a
+   * sync was requested without exposing the flag on the API contract.
+   */
+  get pendingRosterSyncGroupIds(): string[] {
+    return [...this.rosterSyncRequested];
+  }
+
   async upsertGroupMembers(
     chatId: string,
     members: GroupMemberInput[],
@@ -533,9 +671,18 @@ export class InMemoryStore implements Store {
   async listGroupMembers(chatId: string): Promise<GroupMember[]> {
     const roster = this.members.get(chatId);
     if (roster === undefined) return [];
+    // Display-name precedence (mirrors the SQL in
+    // PostgresStore.listGroupMembers): admin override, then the roster
+    // name, then the newest push name captured for that sender in this
+    // chat — so a member without a roster name never renders as a raw
+    // LID/phone when a message name was observed.
+    const resolved = [...roster.values()].map((member) => {
+      const name = this.memberDisplayNameFor(chatId, member);
+      return name === member.name ? member : { ...member, name };
+    });
     // Admins first, then name (nulls last, mirroring the SQL ORDER BY),
     // then stable by userId.
-    return [...roster.values()].sort((a, b) => {
+    return resolved.sort((a, b) => {
       if (a.isAdmin !== b.isAdmin) return Number(b.isAdmin) - Number(a.isAdmin);
       if (a.name === null && b.name !== null) return 1;
       if (a.name !== null && b.name === null) return -1;
@@ -544,6 +691,33 @@ export class InMemoryStore implements Store {
       }
       return a.userId.localeCompare(b.userId);
     });
+  }
+
+  /**
+   * Display name of one roster member: admin override, then roster name,
+   * then the newest non-null `senderName` observed for that sender in the
+   * same chat (SQL parity: the LATERAL subquery in
+   * PostgresStore.listGroupMembers). Null when nothing is known.
+   */
+  private memberDisplayNameFor(
+    chatId: string,
+    member: GroupMember,
+  ): string | null {
+    const override = this.contactOverrides.get(member.phone ?? member.userId);
+    if (override !== undefined) return override;
+    if (member.name !== null) return member.name;
+    let newest: { sentAt: number; name: string } | undefined;
+    for (const message of this.messageLog) {
+      if (message.chatId !== chatId) continue;
+      if (message.senderName === null) continue;
+      const sender = normalizeSenderJid(message.senderId);
+      if (sender !== member.userId && sender !== member.phone) continue;
+      const sentAt = Date.parse(message.sentAt);
+      if (newest === undefined || sentAt > newest.sentAt) {
+        newest = { sentAt, name: message.senderName };
+      }
+    }
+    return newest?.name ?? null;
   }
 
   /** Test seam: capture writes belong to bot-worker in production. */
@@ -590,21 +764,12 @@ export class InMemoryStore implements Store {
         (a.id < b.id ? 1 : a.id > b.id ? -1 : 0),
     );
     const roster = this.members.get(chatId);
-    const normalize = (jid: string): string => jid.replace(/:.*@/, "@");
     // Roster-name fallback (mirrors the SQL LEFT JOIN): messages captured
     // before a name was learned still display the member's current name.
     // An admin contact override wins over both.
     return matching.slice(0, options.limit).map((message) => {
       if (roster === undefined) return message;
-      const sender = normalize(message.senderId);
-      const member =
-        roster.get(sender) ??
-        [...roster.values()].find(
-          (candidate) => candidate.phone !== null && candidate.phone === sender,
-        );
-      const key = member === undefined ? undefined : (member.phone ?? member.userId);
-      const override = key === undefined ? undefined : this.contactOverrides.get(key);
-      const name = override ?? member?.name ?? message.senderName;
+      const name = this.senderNameFor(chatId, message.senderId, message.senderName);
       return name === message.senderName ? message : { ...message, senderName: name };
     });
   }
@@ -781,22 +946,103 @@ export class InMemoryStore implements Store {
     );
     return matching.slice(0, options.limit).map((message) => {
       const group = groupByChat.get(message.chatId as string);
-      const roster = this.members.get(message.chatId as string);
-      const sender = message.senderId.replace(/:.*@/, "@");
-      const member =
-        roster?.get(sender) ??
-        [...(roster?.values() ?? [])].find(
-          (candidate) => candidate.phone !== null && candidate.phone === sender,
-        );
-      const key = member === undefined ? undefined : (member.phone ?? member.userId);
-      const override = key === undefined ? undefined : this.contactOverrides.get(key);
       return {
         ...message,
-        senderName: override ?? member?.name ?? message.senderName,
+        senderName: this.senderNameFor(
+          message.chatId as string,
+          message.senderId,
+          message.senderName,
+        ),
         groupId: group?.id ?? "",
         groupName: group?.name ?? "",
       };
     });
+  }
+
+  /**
+   * Display name for a sender: admin override, else the current roster
+   * name, else the name captured with the message. Mirrors the SQL
+   * LATERAL join (`COALESCE(override, member.name)` with the message's
+   * own `sender_name` as the outer fallback).
+   */
+  private senderNameFor(
+    chatId: string,
+    senderId: string,
+    fallback: string | null,
+  ): string | null {
+    const roster = this.members.get(chatId);
+    if (roster === undefined) return fallback;
+    const sender = normalizeSenderJid(senderId);
+    const member =
+      roster.get(sender) ??
+      [...roster.values()].find(
+        (candidate) => candidate.phone !== null && candidate.phone === sender,
+      );
+    const key = member === undefined ? undefined : (member.phone ?? member.userId);
+    const override = key === undefined ? undefined : this.contactOverrides.get(key);
+    return override ?? member?.name ?? fallback;
+  }
+
+  async searchMessages(options: MessageSearchOptions): Promise<MessageSearchHit[]> {
+    // Only monitored groups are searchable — the same privacy boundary
+    // as listContactMessages (unmonitored chats keep their messages but
+    // the admin API must not surface them).
+    const groupByChat = new Map<string, Group>();
+    for (const group of this.groups.values()) {
+      if (group.monitored && group.chatId !== null) {
+        groupByChat.set(group.chatId, group);
+      }
+    }
+    const aliases =
+      options.senderAliases === undefined
+        ? undefined
+        : new Set(options.senderAliases.map(normalizeSenderJid));
+    const from = options.from === undefined ? -Infinity : Date.parse(options.from);
+    const to = options.to === undefined ? Infinity : Date.parse(options.to);
+    const text = options.text?.trim() ?? "";
+    const needle = text.toLowerCase();
+    const matches: Array<{ message: ApiMessage; group: Group; score: number }> = [];
+    for (const message of this.messageLog) {
+      if (message.chatId === undefined) continue;
+      const group = groupByChat.get(message.chatId);
+      if (group === undefined) continue;
+      if (options.groupId !== undefined && group.id !== options.groupId) continue;
+      if (
+        aliases !== undefined &&
+        !aliases.has(normalizeSenderJid(message.senderId))
+      ) {
+        continue;
+      }
+      const sentAt = Date.parse(message.sentAt);
+      if (sentAt < from || sentAt >= to) continue;
+      // Substring OR trigram match, like `ILIKE '%q%' OR similarity > 0.15`.
+      const score = text === "" ? 0 : trigramSimilarity(message.body, text);
+      if (text !== "" && !message.body.toLowerCase().includes(needle) && score <= 0.15) {
+        continue;
+      }
+      matches.push({ message, group, score });
+    }
+    // Similarity first (when a query is present), then newest first —
+    // the same ORDER BY as the Postgres store.
+    matches.sort(
+      (a, b) =>
+        b.score - a.score ||
+        Date.parse(b.message.sentAt) - Date.parse(a.message.sentAt) ||
+        (a.message.id < b.message.id ? 1 : a.message.id > b.message.id ? -1 : 0),
+    );
+    return matches.slice(0, options.limit).map(({ message, group }) => ({
+      id: message.id,
+      groupId: group.id,
+      groupName: group.name,
+      sentAt: message.sentAt,
+      senderId: message.senderId,
+      senderName: this.senderNameFor(
+        message.chatId as string,
+        message.senderId,
+        message.senderName,
+      ),
+      body: message.body,
+    }));
   }
 
   async listGroupSummaries(
@@ -923,6 +1169,33 @@ export class InMemoryStore implements Store {
     return dateFormat;
   }
 
+  async deleteAllData(): Promise<DeleteAllDataCounts> {
+    // Same scope as PostgresStore.deleteAllData: captured data only.
+    // Administrative state (admin, sessions, provider, settings) and the
+    // connection state are kept; only its lastMessageAt is cleared.
+    let groupMembers = 0;
+    for (const roster of this.members.values()) groupMembers += roster.size;
+    const deleted: DeleteAllDataCounts = {
+      groups: this.groups.size,
+      messages: this.messageLog.length,
+      summaryRuns: this.runs.size,
+      summaries: this.summaries.size,
+      groupMembers,
+      contactOverrides: this.contactOverrides.size,
+    };
+    this.groups.clear();
+    this.members.clear();
+    this.rosterSyncRequested.clear();
+    this.messageLog.length = 0;
+    this.runs.clear();
+    this.runsByIdentity.clear();
+    this.summaries.clear();
+    this.summariesByRunId.clear();
+    this.contactOverrides.clear();
+    this.connection = { ...this.connection, lastMessageAt: null };
+    return deleted;
+  }
+
   async getConnectionStatus(): Promise<ConnectionStatus> {
     // Parity with PostgresStore (fix round A, audit M-4): the stored
     // payload is RAW and visibility (linking states + unexpired) is
@@ -984,6 +1257,24 @@ export class InMemoryStore implements Store {
     if (this.logoutRequestedAt === null) {
       this.logoutRequestedAt = nowIso();
     }
+  }
+
+  async requestSessionReset(): Promise<void> {
+    // Idempotent (mirrors the COALESCE in PostgresStore): the first
+    // pending timestamp survives. The flag is internal — ConnectionStatus
+    // never exposes it; the dashboard polls normal status.
+    if (this.sessionResetRequestedAt === null) {
+      this.sessionResetRequestedAt = nowIso();
+    }
+  }
+
+  /**
+   * Test/diagnostic accessor (NOT part of {@link Store}): the pending
+   * reset timestamp, or null. Lets route/store tests assert that a reset
+   * request was recorded without exposing the flag on the API contract.
+   */
+  get pendingSessionResetAt(): string | null {
+    return this.sessionResetRequestedAt;
   }
 
   async clearLogoutRequest(): Promise<void> {

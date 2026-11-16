@@ -1,7 +1,12 @@
 import type { BotDb } from "./db.js";
 import { errorReason } from "./lib/errors.js";
 import type { Logger } from "./lib/log.js";
-import type { SessionCheckResult, WhatsAppAdapter } from "./whatsapp/adapter.js";
+import { safeChatRef } from "./lib/privacy.js";
+import type {
+  GroupMemberInfo,
+  SessionCheckResult,
+  WhatsAppAdapter,
+} from "./whatsapp/adapter.js";
 import { purgeSessionDir } from "./whatsapp/session-storage.js";
 
 /**
@@ -29,6 +34,19 @@ import { purgeSessionDir } from "./whatsapp/session-storage.js";
  * (CR#7). This is deliberately its own poller (not the history-import
  * tick): the two have different intervals and lifecycles — the import
  * tick pauses while an import runs, which must never delay a logout.
+ *
+ * The same tick also claims at most ONE on-demand roster sync request
+ * (migration 0016) — the "refresh members" path behind an empty Members
+ * tab — after the logout/reset/session-check work, so a roster fetch can
+ * never delay session control.
+ *
+ * "Delete connection data" (migration 0014) is a LOCAL-ONLY reset for a
+ * partial/invalid session: it is processed BEFORE any logout request and
+ * deliberately does NOT call `adapter.logout()` (no remote revoke). The
+ * flow is: consume the flag (which also clears a pending logout), freeze
+ * the capture side, purge the local session files, finalize the row, and
+ * re-arm linking so a fresh QR appears. It is idempotent — a second reset
+ * while already logged out just repeats the local teardown/re-arm.
  */
 
 /** Default bound on the remote logout call (M-1). */
@@ -122,7 +140,7 @@ export class SessionControlService {
 
   /**
    * One poll cycle (exposed for tests; the loop calls it on a timer).
-   * Returns true when a logout request was consumed.
+   * Returns true when a session-reset or logout request was consumed.
    */
   async runOnce(): Promise<boolean> {
     // Opportunistic cleanup (CR#7): an expired pairing payload is a
@@ -132,11 +150,22 @@ export class SessionControlService {
       this.log("debug", "linking_expired_cleared", { count: cleared });
     }
 
+    // A local reset is processed FIRST and consumes any pending logout
+    // flag in the same database write: the reset must win (no remote
+    // revoke for a partial/invalid session).
+    const resetRequestedAt = await this.db.consumeSessionResetRequest();
+    if (resetRequestedAt !== null) {
+      await this.runSessionReset(resetRequestedAt);
+      return true;
+    }
+
     const requestedAt = await this.db.consumeLogoutRequest();
     if (requestedAt === null) {
       // No logout pending: process an admin-requested session health
-      // check (the dashboard "Test session" button).
+      // check (the dashboard "Test session" button), then at most one
+      // on-demand roster sync request (migration 0016).
       await this.runSessionCheck();
+      await this.runRosterSync();
       return false;
     }
     if (this.loggedOut) {
@@ -168,18 +197,7 @@ export class SessionControlService {
     // Local cleanup ALWAYS runs (bounded above): purge the auth-state
     // files (known Baileys artefacts only — anything else is left and
     // reported, M-3) and finalize the row.
-    try {
-      const purge = purgeSessionDir(this.sessionDir, (kept) => {
-        this.log("warn", "session_purge_kept_unknown_files", { count: kept });
-      });
-      this.log("info", "session_state_purged", {
-        removed: purge.removed,
-        kept: purge.kept,
-      });
-    } catch (error) {
-      // A purge failure must not skip the finalize below.
-      this.log("error", "session_purge_failed", { reason: errorReason(error) });
-    }
+    this.purgeSessionState();
     const connectionId = await this.db.ensureConnection();
     await this.db.finalizeLogout(connectionId);
     this.log("info", "logout_completed", { ok });
@@ -196,6 +214,77 @@ export class SessionControlService {
       this.log("error", "session_rearm_failed", { reason: errorReason(error) });
     }
     return true;
+  }
+
+  /**
+   * LOCAL-ONLY "delete connection data" reset (migration 0014). Used for
+   * a partial/invalid session where the remote revoke cannot be trusted
+   * to complete — or would block recovery. Steps: freeze the capture
+   * side, purge the known Baileys artefacts (same safe logs as logout),
+   * finalize the row (`unavailable`, linking cleared), then re-arm so the
+   * normal flow publishes a fresh QR within one poll.
+   *
+   * Deliberately NO `adapter.logout()` call: the linked device is not
+   * revoked remotely and captured data/settings are untouched. The flag
+   * was already consumed (and any pending logout cleared) by the caller,
+   * so a second reset while already logged out simply repeats the local
+   * teardown/re-arm — idempotent, no crash.
+   */
+  private async runSessionReset(requestedAt: Date): Promise<void> {
+    this.log("info", "session_reset_started", {
+      requestedAt: requestedAt.toISOString(),
+    });
+    // Freeze the capture side FIRST: no reconnect attempts and no
+    // further connection-state writes while the session is torn down.
+    this.capture.beginLogout();
+
+    try {
+      this.purgeSessionState();
+      const connectionId = await this.db.ensureConnection();
+      await this.db.finalizeLogout(connectionId);
+    } catch (error) {
+      // The capture side stays frozen (latched) until a successful
+      // re-arm; the admin can retry or restart the worker (ADR 0004).
+      this.loggedOut = true;
+      this.log("error", "session_reset_failed", {
+        requestedAt: requestedAt.toISOString(),
+        reason: errorReason(error),
+      });
+      return;
+    }
+
+    try {
+      await this.capture.rearm();
+      this.loggedOut = false;
+    } catch (error) {
+      this.loggedOut = true;
+      this.log("error", "session_rearm_failed", { reason: errorReason(error) });
+    }
+    this.log("info", "session_reset_completed", {
+      requestedAt: requestedAt.toISOString(),
+      rearmed: !this.loggedOut,
+    });
+  }
+
+  /**
+   * Purges the known Baileys auth artefacts (M-3: anything else in the
+   * directory is left and reported — never logged). Shared by the logout
+   * and reset flows; a purge failure never skips the finalize that
+   * follows it.
+   */
+  private purgeSessionState(): void {
+    try {
+      const purge = purgeSessionDir(this.sessionDir, (kept) => {
+        this.log("warn", "session_purge_kept_unknown_files", { count: kept });
+      });
+      this.log("info", "session_state_purged", {
+        removed: purge.removed,
+        kept: purge.kept,
+      });
+    } catch (error) {
+      // A purge failure must not skip the finalize in the caller.
+      this.log("error", "session_purge_failed", { reason: errorReason(error) });
+    }
   }
 
   /**
@@ -226,6 +315,56 @@ export class SessionControlService {
       latencyMs: result.latencyMs,
       completed,
     });
+  }
+
+  /**
+   * Processes at most ONE pending on-demand roster sync request
+   * (migration 0016). Why it exists: roster capture is event-driven, so
+   * a group discovered BEFORE the admin enabled monitoring never had its
+   * members synced — enabling monitoring (or the manual refresh) records
+   * this request instead. The claim already cleared the flag, so a
+   * failure is not retried automatically: the roster is best-effort and
+   * the admin can request it again. An EMPTY roster is "no data" (group
+   * metadata unavailable), never "the group is empty" — it is logged and
+   * nothing is written (the sync would be a no-op anyway).
+   */
+  private async runRosterSync(): Promise<void> {
+    const claim = await this.db.claimRosterSyncRequest();
+    if (claim === null) return;
+    const ref = {
+      groupId: claim.groupId,
+      chatRef: safeChatRef(claim.chatJid),
+    };
+    this.log("info", "roster_sync_started", ref);
+    let members: GroupMemberInfo[];
+    try {
+      members = await this.adapter.fetchRoster(claim.chatJid);
+    } catch (error) {
+      this.log("error", "roster_sync_failed", {
+        ...ref,
+        reason: errorReason(error),
+      });
+      return;
+    }
+    if (members.length === 0) {
+      // Missing metadata is not a failure: nothing is deactivated.
+      this.log("warn", "roster_sync_empty", ref);
+      return;
+    }
+    try {
+      const result = await this.db.syncGroupMembers(claim.chatJid, members);
+      this.log("info", "roster_sync_completed", {
+        ...ref,
+        members: members.length,
+        upserted: result.upserted,
+        deactivated: result.deactivated,
+      });
+    } catch (error) {
+      this.log("error", "roster_sync_failed", {
+        ...ref,
+        reason: errorReason(error),
+      });
+    }
   }
 
   private scheduleNext(): void {

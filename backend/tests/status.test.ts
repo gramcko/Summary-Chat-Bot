@@ -214,6 +214,61 @@ describe("health and read-only status routes", () => {
     expect(after.statusCode).toBe(200);
   });
 
+  it("records the delete-connection-data reset request (202, idempotent)", async () => {
+    const { app, store } = await makeApp();
+    await setupAdmin(app);
+    const session = await login(app);
+
+    // Auth required (covered by the authenticated route group).
+    const anonymous = await app.inject({
+      method: "POST",
+      url: "/api/connection/reset",
+    });
+    expect(anonymous.statusCode).toBe(401);
+
+    const first = await app.inject({
+      method: "POST",
+      url: "/api/connection/reset",
+      headers: { cookie: session },
+    });
+    expect(first.statusCode).toBe(202);
+    expect(first.json()).toEqual({ ok: true });
+    const pending = store.pendingSessionResetAt;
+    expect(pending).not.toBeNull();
+
+    // Idempotent: an already-pending request keeps its timestamp.
+    const again = await app.inject({
+      method: "POST",
+      url: "/api/connection/reset",
+      headers: { cookie: session },
+    });
+    expect(again.statusCode).toBe(202);
+    expect(again.json()).toEqual({ ok: true });
+    expect(store.pendingSessionResetAt).toBe(pending);
+
+    // The flag stays internal: normal status polling never exposes it.
+    const status = await app.inject({
+      method: "GET",
+      url: "/api/connection",
+      headers: { cookie: session },
+    });
+    expect(status.statusCode).toBe(200);
+    expect(JSON.stringify(status.json())).not.toContain("reset");
+  });
+
+  it("records reset requests in the store without exposing them", async () => {
+    const { store } = await makeApp();
+    expect(store.pendingSessionResetAt).toBeNull();
+    await store.requestSessionReset();
+    const first = store.pendingSessionResetAt;
+    expect(first).toBeTypeOf("string");
+    // Idempotent, and independent from the logout flag.
+    await store.requestSessionReset();
+    expect(store.pendingSessionResetAt).toBe(first);
+    await store.requestLogout();
+    expect(store.pendingSessionResetAt).toBe(first);
+  });
+
   it("requests a live session check and exposes the pending state", async () => {
     const { app } = await makeApp();
     await setupAdmin(app);

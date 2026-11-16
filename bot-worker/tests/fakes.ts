@@ -10,6 +10,7 @@ import type {
   LinkingPayload,
   ConnectionState,
   SessionCheckClaim,
+  RosterSyncClaim,
   SyncMembersResult,
   UpsertChatsResult,
 } from "../src/db.js";
@@ -71,6 +72,13 @@ export class FakeAdapter implements WhatsAppAdapter {
     latencyMs: 12,
     error: null,
   };
+  /**
+   * Mirrors the adapter's persistent "session opened at least once" flag
+   * (migration 0015). Set by the service before connect / after open.
+   */
+  sessionEstablished = false;
+  /** Recorded setSessionEstablished() calls, in order. */
+  readonly sessionEstablishedCalls: boolean[] = [];
 
   private readonly handlers = new Set<(event: AdapterEvent) => void>();
 
@@ -127,6 +135,11 @@ export class FakeAdapter implements WhatsAppAdapter {
 
   setHistoryCaptureChats(chatJids: ReadonlySet<string>): void {
     this.historyCaptureChats = new Set(chatJids);
+  }
+
+  setSessionEstablished(established: boolean): void {
+    this.sessionEstablished = established;
+    this.sessionEstablishedCalls.push(established);
   }
 
   subscribe(handler: (event: AdapterEvent) => void): () => void {
@@ -217,6 +230,13 @@ export class FakeDb implements BotDb {
   >();
   /** Pending admin logout request (ADR 0008). */
   logoutRequestedAt: Date | null = null;
+  /** Pending admin "delete connection data" reset (migration 0014). */
+  sessionResetRequestedAt: Date | null = null;
+  /**
+   * Pending on-demand roster sync requests by chat JID (migration 0016),
+   * mirroring `groups.roster_sync_requested_at`.
+   */
+  readonly rosterSyncRequested = new Map<string, Date>();
   /** Session health check fields (ADR 0008 follow-up). */
   sessionCheckRequestedAt: Date | null = null;
   sessionCheckCheckedAt: Date | null = null;
@@ -225,6 +245,15 @@ export class FakeDb implements BotDb {
   sessionCheckError: string | null = null;
   /** finalizeLogout() call count. */
   finalizeLogoutCalls = 0;
+  /**
+   * Persistent "session has opened at least once" flag (migration 0015),
+   * mirroring `whatsapp_connections.session_established`.
+   */
+  sessionEstablished = false;
+  /** Makes getSessionEstablished() throw (non-fatal read tests). */
+  sessionEstablishedReadError: Error | null = null;
+  /** Makes markSessionEstablished() throw (non-fatal write tests). */
+  sessionEstablishedWriteError: Error | null = null;
   /**
    * Per-call insert failures (CR-M2 tests): each insertMessages() call
    * shifts one error and throws it when present.
@@ -558,6 +587,29 @@ export class FakeDb implements BotDb {
     return updated;
   }
 
+  async claimRosterSyncRequest(): Promise<RosterSyncClaim | null> {
+    // Mirrors the SQL claim: MONITORED groups with a pending request
+    // only, oldest request first; the flag is cleared on claim.
+    const eligible = [...this.rosterSyncRequested.entries()]
+      .filter(([chatJid]) => this.groups.get(chatJid)?.monitored === true)
+      .sort(([, a], [, b]) => a.getTime() - b.getTime());
+    const entry = eligible[0];
+    if (entry === undefined) return null;
+    const [chatJid] = entry;
+    this.rosterSyncRequested.delete(chatJid);
+    const group = this.groups.get(chatJid);
+    if (group === undefined) return null;
+    return { groupId: group.id, chatJid };
+  }
+
+  /** Simulates the backend recording a roster sync request (migration 0016). */
+  requestRosterSync(chatJid: string): void {
+    const group = this.groups.get(chatJid);
+    if (group === undefined) throw new Error(`unknown chat ${chatJid}`);
+    if (!group.monitored) return; // SQL: WHERE monitored = true
+    this.rosterSyncRequested.set(chatJid, new Date());
+  }
+
   async claimSessionCheck(): Promise<SessionCheckClaim | null> {
     const requestedAt = this.sessionCheckRequestedAt;
     if (requestedAt === null) return null;
@@ -602,10 +654,40 @@ export class FakeDb implements BotDb {
     return requestedAt;
   }
 
+  async consumeSessionResetRequest(): Promise<Date | null> {
+    const requestedAt = this.sessionResetRequestedAt;
+    this.sessionResetRequestedAt = null;
+    // Mirrors the SQL: a reset also clears any pending remote logout —
+    // only when a reset actually exists (the UPDATE matches no row
+    // otherwise).
+    if (requestedAt !== null) this.logoutRequestedAt = null;
+    return requestedAt;
+  }
+
+  async getSessionEstablished(): Promise<boolean> {
+    if (this.sessionEstablishedReadError !== null) {
+      throw this.sessionEstablishedReadError;
+    }
+    return this.sessionEstablished;
+  }
+
+  async markSessionEstablished(
+    _connectionId: string,
+    established: boolean,
+  ): Promise<void> {
+    if (this.sessionEstablishedWriteError !== null) {
+      throw this.sessionEstablishedWriteError;
+    }
+    this.sessionEstablished = established;
+  }
+
   async finalizeLogout(_connectionId: string): Promise<void> {
     this.finalizeLogoutCalls += 1;
     this.stateHistory.push("unavailable");
     this.linking = null;
+    // The linked session no longer exists: the next link starts from the
+    // registration-safe history config (mirrors the SQL, migration 0015).
+    this.sessionEstablished = false;
     // last_message_at is deliberately kept (mirrors the SQL).
   }
 

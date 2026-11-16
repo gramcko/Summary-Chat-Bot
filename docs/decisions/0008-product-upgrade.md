@@ -85,6 +85,16 @@ beyond monitored groups, and no new secrets enter logs.
   consumes the flag (logout + session cleanup) and clears it. This
   keeps the boundary of ADR 0004: only bot-worker owns the Baileys
   connection and its credentials.
+- **Delete connection data** (migration 0014) is the recovery control for
+  a partial/invalid session that leaves the worker reconnecting with
+  stale credentials and no QR. `POST /api/connection/reset` sets
+  `session_reset_requested_at` (202, idempotent) and the bot-worker
+  processes it **before** any logout request: it skips the remote
+  `logout()` entirely, purges the local session directory, finalizes the
+  row, and re-arms linking so a fresh QR appears. The consume statement
+  also clears `logout_requested_at`, so a reset wins over a pending
+  remote logout. Captured data, settings, and the AI configuration are
+  untouched; the flag is never exposed in `ConnectionStatus`.
 
 ### Workers supervision (round 3)
 
@@ -177,3 +187,27 @@ workflow: the backend spawns and supervises the `summary-worker` and
   Groups and contacts have client-side search/filter, the sidebar is
   collapsible to an icon rail, and summary-run status changes raise
   in-app toast notifications.
+- **On-demand roster sync (2026-11-16):** an empty Members tab was
+  reachable without a membership event — after "delete all data" groups
+  are re-created unmonitored, discovery only syncs monitored chats, and
+  enabling monitoring afterwards had no way to request a roster. The
+  backend now records `groups.roster_sync_requested_at` (migration
+  0016) when monitoring is enabled (unmonitored → monitored PATCH) or
+  on `POST /api/groups/:id/roster-sync` (202 `{ "ok": true }`, 404
+  unknown, 409 unmonitored). The bot-worker claims at most ONE request
+  per session-control tick (`FOR UPDATE SKIP LOCKED`, `monitored = true`
+  re-checked, so un-monitoring revokes it), calls
+  `adapter.fetchRoster(chatJid)` and writes via `syncGroupMembers`;
+  empty metadata logs `roster_sync_empty` and writes nothing. The flag
+  is internal and never part of the `Group` contract. Best-effort by
+  design: a failure is logged safely and the admin can refresh again
+  (no retry loop).
+- **Display-name precedence (2026-11-16):** contact overrides are the
+  display-name source of truth for the Members tab and for messages.
+  `listGroupMembers` resolves the override, then the roster name, then
+  the newest push name observed for that sender in the chat; the message
+  readers (`listGroupMessages`, `listContactMessages`,
+  `searchMessages`) now prefer the override-aware roster name
+  (`COALESCE(gm.name, m.sender_name)`), so an admin rename applies to
+  already-captured messages. Message push names are fallback only; the
+  InMemoryStore mirrors both behaviors.

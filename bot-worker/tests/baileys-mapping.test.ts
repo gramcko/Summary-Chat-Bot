@@ -8,6 +8,7 @@ import {
   classifyClose,
   classifyHistoryCorrelation,
   historyFailureFromResponseCode,
+  historySyncConfig,
   isIgnoredIncomingJid,
   mapGroupParticipants,
   mapHistoryResponse,
@@ -72,6 +73,56 @@ describe("classifyClose (reconnect policy per disconnect cause)", () => {
     expect(classifyClose(515)).toEqual({
       retryable: true,
       reason: "restart_required",
+    });
+  });
+});
+
+describe("historySyncConfig (ADR 0007 registration safety)", () => {
+  it("never asks for Desktop or full sync on a fresh/unlinked session", () => {
+    // WhatsApp closes a fresh registration that requests full history
+    // with 428 before any QR: every mode must stay registration-safe.
+    for (const mode of ["off", "recent", "full"] as const) {
+      expect(historySyncConfig(mode, false), mode).toEqual({
+        desktopBrowser: false,
+        syncFullHistory: false,
+      });
+    }
+  });
+
+  it("stays safe on the FIRST reconnect after the QR scan (post-scan scenario)", () => {
+    // Regression: Baileys writes `creds.me` as soon as the QR scan
+    // succeeds, but the next socket is still the registration handshake
+    // (515 restart_required). `creds.me` must not be treated as linked —
+    // `session_established` is still false, so `full` must not request
+    // the Desktop preset or full history (428 before open otherwise).
+    expect(historySyncConfig("full", false)).toEqual({
+      desktopBrowser: false,
+      syncFullHistory: false,
+    });
+    expect(historySyncConfig("recent", false)).toEqual({
+      desktopBrowser: false,
+      syncFullHistory: false,
+    });
+  });
+
+  it("keeps off unchanged on an established session", () => {
+    expect(historySyncConfig("off", true)).toEqual({
+      desktopBrowser: false,
+      syncFullHistory: false,
+    });
+  });
+
+  it("uses the Desktop preset (but no full sync) for recent when established", () => {
+    expect(historySyncConfig("recent", true)).toEqual({
+      desktopBrowser: true,
+      syncFullHistory: false,
+    });
+  });
+
+  it("uses the Desktop preset AND full sync for full when established", () => {
+    expect(historySyncConfig("full", true)).toEqual({
+      desktopBrowser: true,
+      syncFullHistory: true,
     });
   });
 });
@@ -897,5 +948,71 @@ describe("history diagnostics (PDO response + notification logs)", () => {
     // A matched payload needs no unverified warning.
     expect(findEvents(h.logs, "history_payload_unverified")).toHaveLength(0);
     expect(logsContain(h.logs, "req-echoed")).toBe(false);
+  });
+});
+
+/**
+ * Connection-close diagnostics (ADR 0007): the status code must be
+ * visible — a 428 on a fresh registration used to be invisible.
+ */
+describe("connection_close diagnostic", () => {
+  interface CloseInternals {
+    onConnectionUpdate(update: Record<string, unknown>): void;
+  }
+
+  function closeHarness(): {
+    internals: CloseInternals;
+    logs: LogEntry[];
+    events: AdapterEvent[];
+  } {
+    const logs: LogEntry[] = [];
+    const adapter = new BaileysAdapter({
+      sessionDir: "unused-in-unit-tests",
+      log: recordingLogger(logs),
+    });
+    const events: AdapterEvent[] = [];
+    adapter.subscribe((event) => events.push(event));
+    return {
+      internals: adapter as unknown as CloseInternals,
+      logs,
+      events,
+    };
+  }
+
+  it("logs the status code, retryability, and reason before emitting close", () => {
+    const h = closeHarness();
+    h.internals.onConnectionUpdate({
+      connection: "close",
+      lastDisconnect: {
+        error: { output: { statusCode: 428 }, message: "Connection Terminated" },
+      },
+    });
+
+    const entries = findEvents(h.logs, "connection_close");
+    expect(entries).toHaveLength(1);
+    expect(entries[0]?.level).toBe("warn");
+    expect(entries[0]?.fields).toEqual({
+      statusCode: 428,
+      retryable: true,
+      reason: "connection_lost",
+    });
+    expect(h.events).toContainEqual({
+      type: "close",
+      retryable: true,
+      reason: "connection_lost",
+    });
+    // The Boom error message is not echoed (safe metadata only).
+    expect(logsContain(h.logs, "Connection Terminated")).toBe(false);
+  });
+
+  it("logs a null status code for a close without a Boom error", () => {
+    const h = closeHarness();
+    h.internals.onConnectionUpdate({ connection: "close" });
+
+    expect(findEvents(h.logs, "connection_close")[0]?.fields).toEqual({
+      statusCode: null,
+      retryable: true,
+      reason: "connection_lost",
+    });
   });
 });

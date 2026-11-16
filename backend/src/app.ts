@@ -10,6 +10,9 @@ import {
   registerSessionRoutes,
   requireAuth,
 } from "./routes/auth.js";
+import { registerAssistantRoutes } from "./routes/assistant.js";
+import type { AssistantPlanner } from "./lib/assistant/planner.js";
+import { registerAdminRoutes } from "./routes/admin.js";
 import { registerConnectionRoutes } from "./routes/connection.js";
 import { registerContactRoutes } from "./routes/contacts.js";
 import { registerGroupRoutes } from "./routes/groups.js";
@@ -36,6 +39,17 @@ export interface BuildAppOptions {
    * cannot spoof its way out of (or into) a lockout bucket.
    */
   trustProxy?: string[];
+  /**
+   * Assistant chat rate limit (per IP). Defaults to 20 requests per
+   * minute; tests lower it to exercise the 429 path without 21 calls.
+   */
+  assistantRateLimit?: { limit?: number; windowMs?: number };
+  /**
+   * Test seam: replace the assistant planner. The default is the Gemini
+   * classifier, which no-ops (deterministic parser fallback) unless the
+   * saved provider is Gemini with a readable key.
+   */
+  assistantPlanner?: AssistantPlanner;
 }
 
 function codeForStatus(status: number): ErrorCode {
@@ -124,6 +138,13 @@ export async function buildApp(options: BuildAppOptions): Promise<FastifyInstanc
     registerRunRoutes(api, options.store, options.enqueue);
     registerSummaryRoutes(api, options.store);
     registerSettingsRoutes(api, options.store);
+    registerAdminRoutes(api, options.store, options.enqueue);
+    registerAssistantRoutes(api, options.store, options.enqueue, {
+      ...options.assistantRateLimit,
+      ...(options.assistantPlanner === undefined
+        ? {}
+        : { planner: options.assistantPlanner }),
+    });
   });
 
   return app;

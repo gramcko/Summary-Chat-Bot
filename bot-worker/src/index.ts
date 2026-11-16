@@ -29,10 +29,14 @@ import { BaileysAdapter } from "./whatsapp/baileys-adapter.js";
 loadRepoEnv();
 
 // Early logger for startup failures; the real level comes from config.
+// LOG_FILE (optional) duplicates every line into a file so a supervised
+// worker's output stays readable outside the backend's terminal.
 const earlyLevel = process.env["LOG_LEVEL"]?.trim();
+const logFile = process.env["LOG_FILE"]?.trim();
 const bootstrapLog = createLogger(
   "bot-worker",
   earlyLevel !== undefined && isLogLevel(earlyLevel) ? earlyLevel : "info",
+  logFile,
 );
 
 function fail(message: string): never {
@@ -47,7 +51,7 @@ try {
   fail(error instanceof ConfigError ? error.message : "Invalid configuration.");
 }
 
-const log: Logger = createLogger("bot-worker", config.logLevel);
+const log: Logger = createLogger("bot-worker", config.logLevel, logFile);
 
 // Fail fast on unusable session storage BEFORE any network activity.
 // The path itself is never logged (ADR 0004).

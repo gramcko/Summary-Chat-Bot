@@ -58,6 +58,14 @@ export interface SessionCheckClaim {
   requestedAt: Date;
 }
 
+/** One claimed on-demand roster sync request (migration 0016). */
+export interface RosterSyncClaim {
+  /** Group id (the backend records the request on the group row). */
+  groupId: string;
+  /** Linked WhatsApp chat JID whose metadata must be fetched. */
+  chatJid: string;
+}
+
 export interface HistoryImportOutcome {
   /** `done` = completed within budget (partial by design); `failed`. */
   status: "done" | "failed";
@@ -256,6 +264,16 @@ export interface BotDb {
     members: GroupMemberUpsert[],
   ): Promise<SyncMembersResult>;
   /**
+   * Atomically claims ONE pending on-demand roster sync request
+   * (migration 0016): a MONITORED group with `roster_sync_requested_at`
+   * set and a linked chat. The claim clears the flag in the same
+   * statement (FOR UPDATE SKIP LOCKED: concurrent claimers never
+   * double-claim) and returns the group id + chat JID, or null when
+   * nothing is pending. Un-monitoring revokes a pending request because
+   * `monitored = true` is part of the claim.
+   */
+  claimRosterSyncRequest(): Promise<RosterSyncClaim | null>;
+  /**
    * Persists display names learned from WhatsApp contacts / message push
    * names (ADR 0008) on existing roster rows. Only rows in MONITORED
    * groups are touched (privacy boundary). Returns the updated row
@@ -271,9 +289,38 @@ export interface BotDb {
    */
   consumeLogoutRequest(): Promise<Date | null>;
   /**
-   * Terminal logout state (ADR 0008): state `unavailable` and linking
-   * payload cleared. `last_message_at` is deliberately KEPT (it is
-   * historical fact) and `logout_requested_at` is already consumed.
+   * Atomically consumes the admin "delete connection data" reset
+   * request (reads and clears `session_reset_requested_at`); returns the
+   * request time, or null when no reset is pending. The same UPDATE also
+   * clears `logout_requested_at`: a reset is LOCAL-ONLY and must win
+   * over a pending remote logout.
+   */
+  consumeSessionResetRequest(): Promise<Date | null>;
+  /**
+   * Persistent "the session has opened at least once" flag (migration
+   * 0015, ADR 0007): true only after a socket reached `connection:
+   * open`, false for a fresh/unlinked session. Read before every
+   * connect to gate the Desktop preset + `syncFullHistory`; `creds.me`
+   * is NOT a valid signal (it exists right after the QR scan, before the
+   * first post-scan reconnect that WhatsApp closes with 428).
+   */
+  getSessionEstablished(): Promise<boolean>;
+  /**
+   * Writes the persistent session-established flag for the single
+   * connection row (migration 0015). `false` is also written by
+   * `finalizeLogout`.
+   */
+  markSessionEstablished(
+    connectionId: string,
+    established: boolean,
+  ): Promise<void>;
+  /**
+   * Terminal logout state (ADR 0008): state `unavailable`, linking
+   * payload cleared, and `session_established = false` (the linked
+   * session no longer exists, so the next link starts from the
+   * registration-safe history config). `last_message_at` is
+   * deliberately KEPT (it is historical fact) and `logout_requested_at`
+   * is already consumed.
    */
   finalizeLogout(connectionId: string): Promise<void>;
 }
@@ -821,6 +868,37 @@ export class PostgresBotDb implements BotDb {
     };
   }
 
+  async claimRosterSyncRequest(): Promise<RosterSyncClaim | null> {
+    // On-demand roster sync (migration 0016): claim ONE request and
+    // clear its flag in the same statement (atomic read-and-clear, like
+    // consumeLogoutRequest). `monitored = true` is re-checked here, so
+    // un-monitoring a group revokes a pending request; a chat without a
+    // linked chat_id has nothing to fetch. FOR UPDATE SKIP LOCKED keeps
+    // concurrent workers from claiming the same row. A crashed worker
+    // simply drops the request: the admin can refresh again (best-effort
+    // by design, no retry loop for a metadata refresh).
+    const result = await this.pool.query<{ id: string; chat_id: string }>(
+      `WITH claimed AS (
+         SELECT id
+         FROM groups
+         WHERE roster_sync_requested_at IS NOT NULL
+           AND monitored = true
+           AND chat_id IS NOT NULL
+         ORDER BY roster_sync_requested_at
+         LIMIT 1
+         FOR UPDATE SKIP LOCKED
+       )
+       UPDATE groups g
+       SET roster_sync_requested_at = NULL, updated_at = now()
+       FROM claimed
+       WHERE g.id = claimed.id
+       RETURNING g.id AS id, g.chat_id AS chat_id`,
+    );
+    const row = result.rows[0];
+    if (row === undefined) return null;
+    return { groupId: row.id, chatJid: row.chat_id };
+  }
+
   async updateGroupMemberNames(
     entries: ReadonlyArray<{ jids: string[]; name: string }>,
   ): Promise<number> {
@@ -881,17 +959,66 @@ export class PostgresBotDb implements BotDb {
     return result.rows[0]?.requested_at ?? null;
   }
 
+  async consumeSessionResetRequest(): Promise<Date | null> {
+    // Atomic read-and-clear of the LOCAL reset request (migration 0014).
+    // `logout_requested_at` is cleared in the SAME statement: a reset is
+    // local-only and must win over a pending remote logout. RETURNING
+    // may reference the FROM-list's pre-update value to report when the
+    // request was made.
+    const result = await this.pool.query<{ requested_at: Date }>(
+      `WITH prev AS (
+         SELECT id, session_reset_requested_at AS requested_at
+         FROM whatsapp_connections
+         WHERE session_reset_requested_at IS NOT NULL
+         LIMIT 1
+       )
+       UPDATE whatsapp_connections w
+       SET session_reset_requested_at = NULL,
+           logout_requested_at = NULL,
+           updated_at = now()
+       FROM prev
+       WHERE w.id = prev.id
+       RETURNING prev.requested_at`,
+    );
+    return result.rows[0]?.requested_at ?? null;
+  }
+
   async finalizeLogout(connectionId: string): Promise<void> {
     // Terminal logout state: `unavailable`, linking payload (and kind)
-    // gone. last_message_at is deliberately KEPT — it is historical fact.
+    // gone, and the session-established flag cleared (migration 0015):
+    // the linked session no longer exists, so the next link must use the
+    // registration-safe history config (ADR 0007). last_message_at is
+    // deliberately KEPT — it is historical fact.
     await this.pool.query(
       `UPDATE whatsapp_connections
        SET state = 'unavailable', since = now(),
            linking_qr = NULL, linking_qr_expires_at = NULL,
            linking_kind = NULL,
+           session_established = false,
            updated_at = now()
        WHERE id = $1`,
       [connectionId],
+    );
+  }
+
+  async getSessionEstablished(): Promise<boolean> {
+    // Single-row connection table: a missing row means nothing was ever
+    // established, which is exactly the safe default.
+    const result = await this.pool.query<{ session_established: boolean }>(
+      "SELECT session_established FROM whatsapp_connections LIMIT 1",
+    );
+    return result.rows[0]?.session_established === true;
+  }
+
+  async markSessionEstablished(
+    connectionId: string,
+    established: boolean,
+  ): Promise<void> {
+    // Idempotent write: the same value on every reconnect is harmless.
+    await this.pool.query(
+      "UPDATE whatsapp_connections SET session_established = $2, " +
+        "updated_at = now() WHERE id = $1",
+      [connectionId, established],
     );
   }
 }

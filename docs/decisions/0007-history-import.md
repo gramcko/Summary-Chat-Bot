@@ -304,10 +304,11 @@ Consequences for this project:
 3. **`WA_HISTORY_SYNC=full`** additionally requests `syncFullHistory` with
    a Windows Desktop browser preset and captures INITIAL_BOOTSTRAP /
    RECENT / FULL history for **monitored groups only**. This is the
-   reliable backfill path, but it requires a WhatsApp **re-link** to
-   trigger the initial sync and decrypts recent group history in memory
-   (unmonitored chats are filtered before mapping and are never stored).
-   It is opt-in because it changes the ADR 0004 privacy posture.
+   reliable backfill path, but it decrypts recent group history in
+   memory (unmonitored chats are filtered before mapping and are never
+   stored). It is opt-in because it changes the ADR 0004 privacy
+   posture. **It cannot be used for a fresh registration** — see the
+   correction below.
 4. A phone `REQUEST_SUCCESS` with no history payload now finishes the
    import as **`done` with 0 imported** (no older history) instead of a
    false `history_timeout`.
@@ -315,3 +316,66 @@ Consequences for this project:
 Operational recommendation: try `recent` and a re-link first; if the phone
 still does not answer ON_DEMAND, use `full` and re-link. Keep the primary
 phone online while importing.
+
+## Correction (2026-11-16): `full` requires a session that has OPENED once
+
+The earlier advice above ("use `full` and re-link") was contradictory:
+`full` requested `syncFullHistory: true` together with the Desktop
+browser preset on EVERY connect, including a fresh/unlinked registration.
+Live probes against a real account showed that WhatsApp closes that
+socket with status **428 "Connection Terminated" before emitting any
+QR**:
+
+| Socket options (fresh session) | Result |
+| --- | --- |
+| full + desktop + `syncFullHistory` | 428, no QR |
+| desktop preset alone | QR |
+| `syncFullHistory` alone | QR |
+| `off` / `recent` | QR |
+
+The adapter decides the connect-time history options from the mode AND
+a persisted "this session has successfully opened at least once" flag
+(`whatsapp_connections.session_established`, migration 0015). It is
+written only after the socket reaches `connection: open` and cleared by
+`finalizeLogout` (logout and reset) and by a terminal close
+(revoked/replaced/corrupt session, which requires a re-link). **`creds.me`
+is deliberately NOT used**: Baileys writes it as soon as the QR scan
+succeeds, but the next socket is still the registration handshake —
+WhatsApp closes it with **515 restart_required** — and the reconnect
+after that already has `creds.me`. Treating `creds.me` as "linked"
+applied the Desktop preset + `syncFullHistory` to that first post-scan
+reconnect, which WhatsApp closes with **428 before `connection: open`**:
+the worker loops, no QR is published, and the phone reports the link as
+failed.
+
+- **Fresh/unlinked registration, and the first reconnect after the QR
+  scan**: always the registration-safe defaults (no Desktop preset,
+  `syncFullHistory: false`), whatever the mode, so WhatsApp issues a QR
+  and the link completes.
+- **Session that has opened at least once** (`session_established =
+  true`): Desktop preset for `recent`/`full`, plus `syncFullHistory: true`
+  only for `full`.
+
+Consequences:
+
+1. `WA_HISTORY_SYNC=full` does **not** apply during linking, not even to
+   the first post-scan reconnect. The first socket of a freshly linked
+   account uses the safe config; `full` applies on a **later reconnect or
+   worker restart**, after the first successful `open` has been
+   persisted.
+2. `shouldSyncHistoryMessage` is unchanged: ON_DEMAND always;
+   INITIAL_BOOTSTRAP/RECENT for `recent`/`full`; FULL for `full`. On the
+   first link `syncFullHistory` is false, so no FULL payload arrives —
+   that is expected, not a failure.
+3. `connect` logs `history_sync_config`
+   (`{ mode, linked, desktopBrowser, syncFullHistory }`) and the close
+   branch logs `connection_close` (`{ statusCode, retryable, reason }`),
+   so a 428 and its cause are visible at the default log level. On the
+   first post-scan reconnect `linked` must be `false`; after a successful
+   open and a later reconnect it is `true`. Both lines contain
+   booleans/strings only — never session material.
+4. The service logs `session_established` (`{ established: true }`) once
+   per transition (info), and read/write failures are non-fatal
+   (`session_established_read_failed` / `session_established_write_failed`
+   at warn with a safe reason). A failed read keeps the safe default
+   (false), so a connect is never blocked.

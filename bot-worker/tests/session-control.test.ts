@@ -230,6 +230,74 @@ describe("SessionControlService (admin logout, ADR 0008)", () => {
   });
 });
 
+describe("SessionControlService (delete connection data reset, migration 0014)", () => {
+  it("consumes the flag, skips the remote logout, purges, finalizes and re-arms", async () => {
+    const h = harness();
+    h.db.sessionResetRequestedAt = new Date();
+    h.db.linking = {
+      qr: "STALE-QR",
+      expiresAt: new Date(Date.now() + 60_000),
+      kind: "qr",
+    };
+
+    expect(await h.control.runOnce()).toBe(true);
+
+    // LOCAL-ONLY: no remote revoke is attempted.
+    expect(h.adapter.logoutCalls).toBe(0);
+    // Known Baileys artefacts are purged (the directory may stay).
+    expect(existsSync(join(h.sessionDir, "creds.json"))).toBe(false);
+    expect(existsSync(join(h.sessionDir, "app-state-sync-key-0.json"))).toBe(
+      false,
+    );
+    expect(existsSync(h.sessionDir)).toBe(true);
+    // Capture frozen first, then re-armed so a fresh QR can appear.
+    expect(h.capture.beginLogoutCalls).toBe(1);
+    expect(h.capture.rearmCalls).toBe(1);
+    // Terminal state written and the request flag consumed.
+    expect(h.db.sessionResetRequestedAt).toBeNull();
+    expect(h.db.finalizeLogoutCalls).toBe(1);
+    expect(h.db.linking).toBeNull();
+    expect(h.db.stateHistory.at(-1)).toBe("unavailable");
+    // Safe logs only: timestamps/flags, never QR material.
+    expect(findEvents(h.logs, "session_reset_started")).toHaveLength(1);
+    expect(
+      findEvents(h.logs, "session_reset_completed")[0]?.fields,
+    ).toMatchObject({ rearmed: true });
+    expect(JSON.stringify(h.logs)).not.toContain("STALE-QR");
+  });
+
+  it("clears a pending logout flag: the reset wins over the remote logout", async () => {
+    const h = harness();
+    h.db.logoutRequestedAt = new Date();
+    h.db.sessionResetRequestedAt = new Date();
+
+    expect(await h.control.runOnce()).toBe(true);
+
+    expect(h.adapter.logoutCalls).toBe(0);
+    expect(h.db.logoutRequestedAt).toBeNull();
+    expect(findEvents(h.logs, "logout_started")).toHaveLength(0);
+    expect(findEvents(h.logs, "session_reset_completed")).toHaveLength(1);
+    // The logout flow did not run a second time on the next tick.
+    expect(await h.control.runOnce()).toBe(false);
+    expect(h.adapter.logoutCalls).toBe(0);
+  });
+
+  it("is idempotent: a second reset while already logged out is harmless", async () => {
+    const h = harness({ rearmThrows: true });
+    h.db.sessionResetRequestedAt = new Date();
+    await h.control.runOnce(); // purge + finalize, re-arm fails → latch set
+
+    h.db.sessionResetRequestedAt = new Date();
+    expect(await h.control.runOnce()).toBe(true);
+
+    expect(h.adapter.logoutCalls).toBe(0); // never a remote revoke
+    expect(h.db.finalizeLogoutCalls).toBe(2);
+    expect(h.capture.rearmCalls).toBe(2);
+    expect(findEvents(h.logs, "session_reset_completed")).toHaveLength(2);
+    expect(findEvents(h.logs, "session_rearm_failed")).toHaveLength(2);
+  });
+});
+
 describe("re-link after logout (CR-M1)", () => {
   it("publishes a fresh QR after the logout flow re-armed the capture", async () => {
     // Full stack: the real CaptureService + FakeAdapter + FakeDb, so the
@@ -325,5 +393,132 @@ describe("re-link after logout (CR-M1)", () => {
     expect(h.db.sessionCheckOk).toBe(false);
     expect(h.db.sessionCheckError).toBe("not_connected");
     await h.control.stop();
+  });
+});
+
+describe("SessionControlService (on-demand roster sync, migration 0016)", () => {
+  /** Discovers a chat and opts it in (FakeDb mirrors the never-clobber rule). */
+  async function monitoredGroup(db: FakeDb, chatJid: string): Promise<string> {
+    await db.upsertDiscoveredChats(
+      [{ chatJid, name: "Group A", members: [] }],
+      { timezone: "UTC" },
+    );
+    db.adminConfigure(chatJid, { monitored: true });
+    return db.groups.get(chatJid)!.id;
+  }
+
+  it("claims one pending request, fetches the roster and syncs the members", async () => {
+    const h = harness();
+    const groupId = await monitoredGroup(h.db, GROUP_A);
+    h.adapter.rosterResults.set(GROUP_A, [
+      {
+        userId: "111@s.whatsapp.net",
+        name: "Alice",
+        phone: "111@s.whatsapp.net",
+        isAdmin: true,
+      },
+      { userId: "222@lid", name: null, phone: null, isAdmin: false },
+    ]);
+    h.db.requestRosterSync(GROUP_A);
+
+    expect(await h.control.runOnce()).toBe(false);
+
+    expect(h.adapter.rosterRequests).toEqual([GROUP_A]);
+    // The flag was consumed atomically by the claim.
+    expect(h.db.rosterSyncRequested.size).toBe(0);
+    const roster = h.db.membersByChat.get(GROUP_A);
+    expect(roster?.size).toBe(2);
+    expect([...roster!.values()].every((member) => member.active)).toBe(true);
+    expect(findEvents(h.logs, "roster_sync_started")[0]?.fields).toMatchObject({
+      groupId,
+    });
+    expect(findEvents(h.logs, "roster_sync_completed")[0]?.fields).toMatchObject({
+      groupId,
+      members: 2,
+      upserted: 2,
+      deactivated: 0,
+    });
+    // Safe logs only: the raw chat JID (PII carrier) never appears.
+    expect(JSON.stringify(h.logs)).not.toContain(GROUP_A);
+
+    // The request is gone: the next tick does not fetch again.
+    expect(await h.control.runOnce()).toBe(false);
+    expect(h.adapter.rosterRequests).toEqual([GROUP_A]);
+  });
+
+  it("consumes at most ONE request per tick", async () => {
+    const h = harness();
+    await monitoredGroup(h.db, GROUP_A);
+    const groupB = "333333333333-44444444@g.us";
+    await monitoredGroup(h.db, groupB);
+    h.adapter.rosterResults.set(GROUP_A, [
+      { userId: "111@s.whatsapp.net", name: null, phone: null, isAdmin: false },
+    ]);
+    h.adapter.rosterResults.set(groupB, [
+      { userId: "222@s.whatsapp.net", name: null, phone: null, isAdmin: false },
+    ]);
+    h.db.requestRosterSync(GROUP_A);
+    h.db.requestRosterSync(groupB);
+
+    expect(await h.control.runOnce()).toBe(false);
+    expect(h.adapter.rosterRequests).toHaveLength(1);
+    expect(h.db.rosterSyncRequested.size).toBe(1);
+
+    expect(await h.control.runOnce()).toBe(false);
+    expect(h.adapter.rosterRequests).toHaveLength(2);
+    expect(h.db.rosterSyncRequested.size).toBe(0);
+  });
+
+  it("treats an EMPTY roster as no data, not a failure", async () => {
+    const h = harness();
+    await monitoredGroup(h.db, GROUP_A);
+    h.db.requestRosterSync(GROUP_A);
+
+    expect(await h.control.runOnce()).toBe(false);
+
+    expect(h.adapter.rosterRequests).toEqual([GROUP_A]);
+    expect(findEvents(h.logs, "roster_sync_empty")).toHaveLength(1);
+    expect(findEvents(h.logs, "roster_sync_failed")).toHaveLength(0);
+    expect(findEvents(h.logs, "roster_sync_completed")).toHaveLength(0);
+    // Nothing was written (an empty roster must never deactivate anyone).
+    expect(h.db.membersByChat.has(GROUP_A)).toBe(false);
+  });
+
+  it("logs a safe failure when the roster fetch throws", async () => {
+    const h = harness();
+    await monitoredGroup(h.db, GROUP_A);
+    h.adapter.rosterError = new Error("metadata unavailable");
+    h.db.requestRosterSync(GROUP_A);
+
+    expect(await h.control.runOnce()).toBe(false);
+
+    const failed = findEvents(h.logs, "roster_sync_failed");
+    expect(failed).toHaveLength(1);
+    expect(failed[0]?.fields).toMatchObject({ reason: "metadata unavailable" });
+    expect(findEvents(h.logs, "roster_sync_completed")).toHaveLength(0);
+    expect(JSON.stringify(h.logs)).not.toContain(GROUP_A);
+  });
+
+  it("does nothing when no request is pending", async () => {
+    const h = harness();
+    await monitoredGroup(h.db, GROUP_A);
+
+    expect(await h.control.runOnce()).toBe(false);
+
+    expect(h.adapter.rosterRequests).toEqual([]);
+    expect(findEvents(h.logs, "roster_sync_started")).toHaveLength(0);
+  });
+
+  it("never claims a request for an unmonitored group (privacy boundary)", async () => {
+    const h = harness();
+    await monitoredGroup(h.db, GROUP_A);
+    h.db.requestRosterSync(GROUP_A);
+    // The admin un-monitors BEFORE the worker polls: the claim skips it.
+    h.db.adminConfigure(GROUP_A, { monitored: false });
+
+    expect(await h.control.runOnce()).toBe(false);
+
+    expect(h.adapter.rosterRequests).toEqual([]);
+    expect(findEvents(h.logs, "roster_sync_started")).toHaveLength(0);
   });
 });

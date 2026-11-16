@@ -925,6 +925,55 @@ describe.skipIf(!shouldRun)(
       expect(ghost.rows[0]?.name).toBe("Alice Updated"); // untouched
     });
 
+    it("claimRosterSyncRequest claims ONE monitored request and clears the flag (migration 0016)", async () => {
+      const chatA = "roster-sync-a@g.us";
+      const chatB = "roster-sync-b@g.us";
+      const unmonitored = "roster-sync-unmonitored@g.us";
+      for (const chatJid of [chatA, chatB, unmonitored]) {
+        await db.upsertDiscoveredChats(
+          [{ chatJid, name: chatJid, members: [] }],
+          { timezone: "UTC" },
+        );
+      }
+      await pool.query(
+        "UPDATE groups SET monitored = true WHERE chat_id = ANY($1::text[])",
+        [[chatA, chatB]],
+      );
+      // chatB requested first (oldest first), chatA later, and an
+      // UNMONITORED chat with a stray flag that must never be claimed.
+      await pool.query(
+        "UPDATE groups SET roster_sync_requested_at = now() - interval '1 minute' WHERE chat_id = $1",
+        [chatB],
+      );
+      await pool.query(
+        "UPDATE groups SET roster_sync_requested_at = now() WHERE chat_id = $1",
+        [chatA],
+      );
+      await pool.query(
+        "UPDATE groups SET roster_sync_requested_at = now() WHERE chat_id = $1",
+        [unmonitored],
+      );
+
+      const first = await db.claimRosterSyncRequest();
+      expect(first).not.toBeNull();
+      expect(first?.chatJid).toBe(chatB);
+      expect(first?.groupId).toEqual(expect.any(String));
+
+      // The claim cleared the flag in the same statement.
+      const cleared = await pool.query<{
+        roster_sync_requested_at: Date | null;
+      }>(
+        "SELECT roster_sync_requested_at FROM groups WHERE chat_id = $1",
+        [chatB],
+      );
+      expect(cleared.rows[0]?.roster_sync_requested_at).toBeNull();
+
+      // One request per call.
+      expect((await db.claimRosterSyncRequest())?.chatJid).toBe(chatA);
+      // The unmonitored request is revoked, not claimed (privacy boundary).
+      expect(await db.claimRosterSyncRequest()).toBeNull();
+    });
+
     it("updateGroupMemberNames writes learned names on monitored rosters only", async () => {
       const chatId = "names-test@g.us";
       await db.upsertDiscoveredChats(
@@ -1044,6 +1093,63 @@ describe.skipIf(!shouldRun)(
       expect(row.rows[0]?.linking_kind).toBeNull();
       expect(row.rows[0]?.logout_requested_at).toBeNull();
       // last_message_at is historical fact — deliberately kept.
+      expect(row.rows[0]?.last_message_at).not.toBeNull();
+    });
+
+    it("persists session_established and clears it on finalizeLogout (migration 0015)", async () => {
+      const connectionId = await db.ensureConnection();
+      // Fresh connection: nothing has opened yet (registration-safe).
+      expect(await db.getSessionEstablished()).toBe(false);
+
+      await db.markSessionEstablished(connectionId, true);
+      expect(await db.getSessionEstablished()).toBe(true);
+      const established = await pool.query<{ session_established: boolean }>(
+        "SELECT session_established FROM whatsapp_connections WHERE id = $1",
+        [connectionId],
+      );
+      expect(established.rows[0]?.session_established).toBe(true);
+
+      // Idempotent: writing the same value again is harmless.
+      await db.markSessionEstablished(connectionId, true);
+      expect(await db.getSessionEstablished()).toBe(true);
+
+      // Logout/reset both finalize the row and clear the flag, so the
+      // next link uses the registration-safe history config.
+      await db.finalizeLogout(connectionId);
+      expect(await db.getSessionEstablished()).toBe(false);
+
+      await db.markSessionEstablished(connectionId, true);
+      await db.markSessionEstablished(connectionId, false);
+      expect(await db.getSessionEstablished()).toBe(false);
+    });
+
+    it("session reset request is consumed once and clears a pending logout", async () => {
+      const connectionId = await db.ensureConnection();
+      await pool.query(
+        "UPDATE whatsapp_connections SET logout_requested_at = now(), " +
+          "session_reset_requested_at = now(), last_message_at = now() " +
+          "WHERE id = $1",
+        [connectionId],
+      );
+
+      const requestedAt = await db.consumeSessionResetRequest();
+      expect(requestedAt).toBeInstanceOf(Date);
+      // Consumed exactly once (atomic read-and-clear).
+      expect(await db.consumeSessionResetRequest()).toBeNull();
+
+      const row = await pool.query<{
+        session_reset_requested_at: Date | null;
+        logout_requested_at: Date | null;
+        last_message_at: Date | null;
+      }>(
+        "SELECT session_reset_requested_at, logout_requested_at, " +
+          "last_message_at FROM whatsapp_connections WHERE id = $1",
+        [connectionId],
+      );
+      // The reset wins over the pending remote logout; captured
+      // metadata (last_message_at) is untouched by the consume.
+      expect(row.rows[0]?.session_reset_requested_at).toBeNull();
+      expect(row.rows[0]?.logout_requested_at).toBeNull();
       expect(row.rows[0]?.last_message_at).not.toBeNull();
     });
 

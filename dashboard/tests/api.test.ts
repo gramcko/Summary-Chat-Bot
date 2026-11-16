@@ -447,6 +447,19 @@ test("encodes identifiers in request paths", async () => {
   assert.equal(lastCall().url, "/api/groups/group%201");
 });
 
+test("requestRosterSync posts to the group roster-sync route", async () => {
+  stubFetch(() => jsonResponse({ ok: true }, 202));
+
+  const result = await api.requestRosterSync("group 1");
+  assert.deepEqual(result, { ok: true });
+
+  const call = firstCall();
+  assert.equal(call.url, "/api/groups/group%201/roster-sync");
+  assert.equal(call.init?.method, "POST");
+  assert.equal(call.init?.body, undefined);
+  assert.equal(call.init?.credentials, "include");
+});
+
 test("toApiError normalizes unknown failures and passes ApiError through", () => {
   const original = new ApiError({
     status: 400,

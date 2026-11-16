@@ -152,6 +152,19 @@ migration CHECK constraint:
   automatically** (deleting user data without approval is prohibited);
   the operator removes them manually before re-linking if the state is
   corrupt (see Re-linking below).
+- **Post-scan reconnect (515) and `session_established`:** a successful
+  QR scan makes Baileys write `creds.me`, then WhatsApp closes the socket
+  with **515 restart_required**; the reconnect after it is still the
+  registration handshake. `creds.me` therefore does NOT mean "linked" for
+  socket options. The connect-time history config reads the persisted
+  `whatsapp_connections.session_established` flag (migration 0015), which
+  the service writes only after `connection: open` and clears on
+  `finalizeLogout` (logout/reset) and on a terminal close (the session is
+  gone, so a manual re-link must also start safe). Without that gate the
+  first post-scan reconnect requested the Desktop preset + full history
+  and was closed with **428 before `connection: open`** — the worker
+  looped, no QR was published, and the phone reported the link as failed
+  (ADR 0007).
 - Graceful shutdown (SIGINT/SIGTERM): stop timers → close the socket
   (auth state saved) → let in-flight message batches commit → close the
   database pool. A lost session stays `unavailable` on shutdown (it is
@@ -249,6 +262,13 @@ message (the filter queries PostgreSQL per batch). Normalized into the
   therefore **not** captured automatically; do not promise otherwise.
   The one deliberate exception is the **on-demand** history import of
   ADR 0007 (admin opt-in, monitored groups only, bounded budget).
+  `WA_HISTORY_SYNC=recent`/`full` widens the connect-time sync, but the
+  Desktop preset + `syncFullHistory` are requested **only after the
+  session has opened at least once** (persisted `session_established`,
+  migration 0015): the first socket of a freshly linked account — and
+  the first reconnect after the QR scan — always uses the
+  registration-safe config, so `full` applies on a later reconnect or
+  worker restart, never during linking.
   Decryption eligibility (`shouldIgnoreJid`) matches that scope: `@g.us`
   group chats **plus the account's own PN/LID identities** — WhatsApp
   delivers the self-addressed on-demand history response as a
@@ -412,8 +432,24 @@ retention policy is productized (Phase E/F):
   (`logout()`, verified in Baileys 6.7.24 — it does NOT delete local
   files), deletes the session-directory FILES (the directory may stay),
   and finalizes the row to `unavailable` with the linking payload
-  cleared (`last_message_at` is kept — historical fact). Idempotent: a
+  cleared and `session_established = false` (migration 0015, so the next
+  link starts with the registration-safe history config).
+  `last_message_at` is kept — historical fact. Idempotent: a
   second request while logged out only clears the flag.
+- **Delete connection data (local reset, migration 0014):** the recovery
+  path for a partial/invalid session that keeps reconnecting with stale
+  credentials and never publishes a QR. The backend sets
+  `whatsapp_connections.session_reset_requested_at`
+  (`POST /api/connection/reset`, 202, idempotent). The bot-worker
+  processes it BEFORE any logout request and deliberately does **not**
+  call `logout()`: it freezes the capture side, purges the same known
+  local session artefacts as the logout flow, finalizes the row
+  (`unavailable`, linking cleared, `session_established = false`,
+  `last_message_at` kept), and re-arms
+  linking so a fresh QR appears within one poll. The consume statement
+  clears `logout_requested_at` too, so a reset wins over a pending
+  remote logout. Captured messages, settings, and the AI configuration
+  are untouched; a second reset while already logged out is idempotent.
 - **Group members roster (best-effort):** on connect the discovered
   groups' participants are upserted into `group_members` (user JID,
   name when available, PN JID fallback, admin flag);

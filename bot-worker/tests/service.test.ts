@@ -1016,3 +1016,133 @@ describe("connect-time history (WA_HISTORY_SYNC=full)", () => {
     expect(h.db.messages).toHaveLength(0);
   });
 });
+
+describe("session establishment persistence (migration 0015, ADR 0007)", () => {
+  it("loads the persisted flag BEFORE connect and marks it on the first open", async () => {
+    const h = harness();
+    expect(h.db.sessionEstablished).toBe(false);
+
+    await h.service.start();
+    // Before the socket is created the adapter is told "not established"
+    // (this is what keeps the first post-scan reconnect on the safe
+    // config even though creds.me already exists).
+    expect(h.adapter.sessionEstablishedCalls).toEqual([false]);
+    expect(h.adapter.sessionEstablished).toBe(false);
+
+    h.adapter.emit({ type: "open" });
+    await h.service.idle();
+
+    expect(h.db.sessionEstablished).toBe(true);
+    expect(h.adapter.sessionEstablished).toBe(true);
+    const logs = findEvents(h.logs, "session_established");
+    expect(logs).toHaveLength(1);
+    expect(logs[0]?.level).toBe("info");
+    expect(logs[0]?.fields).toEqual({ established: true });
+    await h.service.stop();
+  });
+
+  it("logs session_established only on the transition, not on every open", async () => {
+    const h = harness();
+    await h.service.start();
+    h.adapter.emit({ type: "open" });
+    await h.service.idle();
+    h.adapter.emit({ type: "open" });
+    await h.service.idle();
+
+    expect(findEvents(h.logs, "session_established")).toHaveLength(1);
+    await h.service.stop();
+  });
+
+  it("a reconnect reloads the persisted flag before connecting", async () => {
+    const h = harness();
+    h.db.sessionEstablished = true; // an earlier worker run opened it
+    await h.service.start();
+
+    // The flag was read from PostgreSQL, not inferred from the session
+    // files: the adapter is ready to use the full-history config.
+    expect(h.adapter.sessionEstablishedCalls).toEqual([true]);
+    expect(h.adapter.sessionEstablished).toBe(true);
+    await h.service.stop();
+  });
+
+  it("logout/reset clears the flag in the DB and resets the adapter before re-arm", async () => {
+    const h = harness();
+    await h.service.start();
+    h.adapter.emit({ type: "open" });
+    await h.service.idle();
+    expect(h.db.sessionEstablished).toBe(true);
+
+    // Session control: freeze, finalize (clears the DB flag), re-arm.
+    h.service.beginLogout();
+    expect(h.adapter.sessionEstablished).toBe(false); // reset explicitly
+    await h.db.finalizeLogout(h.db.connectionId);
+    expect(h.db.sessionEstablished).toBe(false);
+
+    await h.service.rearm();
+    // doConnect reloads the cleared flag before the next socket.
+    expect(h.adapter.sessionEstablished).toBe(false);
+    expect(h.adapter.sessionEstablishedCalls.at(-1)).toBe(false);
+    expect(h.adapter.connectCalls).toBe(2);
+
+    // The next successful open marks it again (fresh link).
+    h.adapter.emit({ type: "open" });
+    await h.service.idle();
+    expect(h.db.sessionEstablished).toBe(true);
+    expect(h.adapter.sessionEstablished).toBe(true);
+    await h.service.stop();
+  });
+
+  it("a terminal close clears the flag so a manual re-link stays safe", async () => {
+    const h = harness();
+    await h.service.start();
+    h.adapter.emit({ type: "open" });
+    await h.service.idle();
+    expect(h.db.sessionEstablished).toBe(true);
+
+    // Revoked/replaced/corrupt session: the operator may delete the
+    // session files and re-link manually instead of using the reset
+    // control. The first post-scan reconnect must still be safe.
+    h.adapter.emit({
+      type: "close",
+      retryable: false,
+      reason: "session_invalid",
+    });
+    await h.service.idle();
+
+    expect(h.service.sessionStatus).toBe("lost-logged-out");
+    expect(h.db.sessionEstablished).toBe(false);
+    expect(h.adapter.sessionEstablished).toBe(false);
+    await h.service.stop();
+  });
+
+  it("treats a flag read failure as non-fatal (safe config, connect proceeds)", async () => {
+    const h = harness();
+    h.db.sessionEstablishedReadError = new Error("connection refused");
+
+    await h.service.start();
+    expect(h.adapter.connectCalls).toBe(1);
+    expect(h.adapter.sessionEstablished).toBe(false); // safe default kept
+    const logs = findEvents(h.logs, "session_established_read_failed");
+    expect(logs).toHaveLength(1);
+    expect(logs[0]?.level).toBe("warn");
+    expect(logs[0]?.fields).toEqual({ reason: "connection refused" });
+    await h.service.stop();
+  });
+
+  it("treats a flag write failure as non-fatal (connection stays up)", async () => {
+    const h = harness();
+    await h.service.start();
+    h.db.sessionEstablishedWriteError = new Error("write failed");
+
+    h.adapter.emit({ type: "open" });
+    await h.service.idle();
+
+    expect(h.service.sessionStatus).toBe("connected");
+    // The in-memory flag still lets THIS process use the full config.
+    expect(h.adapter.sessionEstablished).toBe(true);
+    expect(findEvents(h.logs, "session_established_write_failed")).toHaveLength(
+      1,
+    );
+    await h.service.stop();
+  });
+});

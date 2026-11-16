@@ -12,7 +12,8 @@ Redis/BullMQ, and a Next.js dashboard.
 ## Features
 
 - **WhatsApp linking** — QR or phone-number pairing code from the dashboard;
-  in-app **End session / Unlink**, plus a live **Test session** health probe.
+  in-app **End session / Unlink** (remote revoke), **Delete connection data**
+  (local session reset + fresh QR), plus a live **Test session** health probe.
 - **Group discovery and opt-in monitoring** — groups are discovered
   unmonitored; the admin opts each one in.
 - **Daily and manual summaries** — scheduled or on-demand, per group, with
@@ -27,6 +28,14 @@ Redis/BullMQ, and a Next.js dashboard.
 - **Contact name overrides** — admins can rename a contact; the override wins
   over WhatsApp/roster names.
 - **Search and filters** — groups and contacts can be searched/filtered.
+- **Dashboard assistant** — ask questions in English or Spanish over
+  monitored data: "do a summary on Equipo Ventas today", "which groups
+  does Ana participate in?", "when did Ana talk about the launch?".
+  Answers cite the groups, messages, or runs they used; conversations
+  stay in the browser and are never stored. When Gemini is configured, a
+  model call may classify the question and an optional second call may
+  rewrite the reply text, but the tools, citations, and runs always come
+  from monitored data.
 - **Live notifications** — toasts for summary requested/started/completed/
   failed, history-import requests, and contact renames.
 - **Collapsible sidebar** - icon-only rail on desktop, full labels when open;
@@ -160,7 +169,10 @@ npm run migrate -w @summarly/backend down
 
 Migrations include the group roster (`group_members`), message sender names,
 history-import state, session control, contact name overrides
-(`contact_overrides`), and global settings (`app_settings`).
+(`contact_overrides`), global settings (`app_settings`), and the dashboard
+assistant's message search (the `pg_trgm` extension plus a GIN trigram index
+on `messages.body`; migration 0013). The database role must be allowed to
+`CREATE EXTENSION pg_trgm` — the migration fails loudly otherwise.
 
 ## Commands
 
@@ -218,6 +230,20 @@ scripts/          Provider smoke test and e2e harness
   remote-access authentication model first.
 - The dashboard proxy strips client-supplied forwarding headers before
   forwarding `/api/*` to the backend.
+- **Danger zone:** `POST /api/admin/delete-all-data` (body exactly
+  `{ "confirmation": "DELETE ALL" }`) permanently deletes all captured
+  data — groups, messages, summary runs, summaries, rosters, and contact
+  overrides — and clears the connection's last-message time. It keeps
+  settings, the AI provider configuration, admin credentials/sessions,
+  the WhatsApp connection row/state, and the Baileys session directory
+  (the session stays linked). Backups taken earlier still contain the
+  data.
+- **End session / Unlink vs. Delete connection data.** `POST
+  /api/connection/logout` revokes the linked device on WhatsApp first and
+  then clears the local session. `POST /api/connection/reset` is the
+  recovery path for a partial/invalid session: it skips the remote
+  revoke, deletes only the LOCAL Baileys session data, keeps captured
+  data and settings, and re-arms QR linking so a fresh QR appears.
 
 ## Limitations
 
@@ -227,11 +253,23 @@ scripts/          Provider smoke test and e2e harness
   nothing, or several batches. A group with no captured messages has no anchor
   for on-demand paging (`history_no_anchor`). On-demand is unreliable on some
   companion devices; `WA_HISTORY_SYNC=recent` (let the initial sync complete)
-  or `full` (opt-in capture of monitored groups' initial history, requires a
-  re-link) are the supported fallbacks.
+  or `full` (opt-in capture of monitored groups' initial history) are the
+  supported fallbacks. `full` only applies to an already-linked session: link
+  first with `off`/`recent`, then restart the worker with `full` — a fresh
+  registration that requests full history is closed by WhatsApp (428) before
+  any QR appears.
 - **Group metadata carries only JIDs**, not names. Names come from saved
   contacts, message push names, or an admin override. LID-only members may show
   a phone number or “Unknown contact”.
+- **Roster refresh is best-effort and on-demand.** Members are captured on
+  discovery and on membership changes, and only for monitored groups — so a
+  group discovered before it was monitored (for example after "delete all
+  data", when groups are re-created unmonitored) starts with an empty roster.
+  Enabling monitoring requests a refresh automatically, and the Members tab can
+  request one manually (`POST /api/groups/:id/roster-sync`, migration 0016).
+  The bot-worker serves it on its next session-control poll (≈3 s); WhatsApp
+  may still return no metadata, in which case nothing is written (members are
+  never deactivated by an empty result) and the admin can retry.
 - Summaries are AI-generated. Consequential items should be verified against
   the source messages; the UI displays this warning.
 - Media transcription, vector search, Kubernetes, and multi-tenant SaaS

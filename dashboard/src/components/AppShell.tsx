@@ -17,6 +17,7 @@ import { Button } from "./ui/Button";
 
 type IconName =
   | "overview"
+  | "assistant"
   | "groups"
   | "contacts"
   | "runs"
@@ -33,6 +34,12 @@ const ICON_PATHS: Record<IconName, ReactNode> = {
       <rect x="14" y="3" width="7" height="7" rx="1.6" />
       <rect x="3" y="14" width="7" height="7" rx="1.6" />
       <rect x="14" y="14" width="7" height="7" rx="1.6" />
+    </>
+  ),
+  assistant: (
+    <>
+      <path d="M20 12.2c0 3.9-3.6 7-8 7a9.2 9.2 0 0 1-2.6-.4L4 21l1.4-4a6.6 6.6 0 0 1-1.4-4.1c0-3.9 3.6-7 8-7s8 3.1 8 7Z" />
+      <path d="M8.5 11.5h7M8.5 14.5h4.5" />
     </>
   ),
   groups: (
@@ -107,6 +114,7 @@ interface NavItem {
 
 const NAV_ITEMS: readonly NavItem[] = [
   { href: "/", label: "Overview", icon: "overview" },
+  { href: "/assistant", label: "Assistant", icon: "assistant" },
   { href: "/groups", label: "Groups", icon: "groups" },
   { href: "/contacts", label: "Contacts", icon: "contacts" },
   { href: "/runs", label: "Summary runs", icon: "runs" },
@@ -236,19 +244,6 @@ export function AppShell({ children }: { children: ReactNode }) {
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [loggingOut, setLoggingOut] = useState(false);
   const [logoutError, setLogoutError] = useState<string | null>(null);
-  const [suppressHover, setSuppressHover] = useState(false);
-
-  /**
-   * A nav click collapses the desktop rail immediately, even while the
-   * pointer is still over it. Moving the pointer out resets the flag, so
-   * the next hover expands normally.
-   */
-  function handleNavigate(): void {
-    setSuppressHover(true);
-    if (document.activeElement instanceof HTMLElement) {
-      document.activeElement.blur();
-    }
-  }
 
   // Close the mobile drawer whenever the route changes.
   useEffect(() => {
@@ -289,21 +284,22 @@ export function AppShell({ children }: { children: ReactNode }) {
 
       {/* Desktop sidebar: icon rail, expands on hover/focus with an overlay */}
       <aside
-        className={`${
-          suppressHover ? "" : "group"
-        } fixed inset-y-0 left-0 z-30 hidden w-[4.5rem] flex-col overflow-hidden border-r border-slate-200 bg-white shadow-sm transition-[width,box-shadow] duration-200 ease-out lg:flex ${
-          suppressHover
-            ? ""
-            : "hover:w-64 hover:shadow-raised focus-within:w-64 focus-within:shadow-raised"
-        }`}
-        onMouseLeave={() => setSuppressHover(false)}
-        onFocusCapture={() => setSuppressHover(false)}
+        className="group fixed inset-y-0 left-0 z-30 hidden w-[4.5rem] flex-col overflow-hidden border-r border-slate-200 bg-white shadow-sm transition-[width,box-shadow] duration-200 ease-out hover:w-64 hover:shadow-raised focus-within:w-64 focus-within:shadow-raised lg:flex"
+        // Clicking a nav link leaves it focused, and `focus-within` would keep
+        // the rail expanded until the user clicks elsewhere. Leaving the rail
+        // drops focus inside it so hover alone controls expansion again.
+        // Keyboard users still get `focus-within` while the rail has focus.
+        onMouseLeave={(event) => {
+          const active = document.activeElement;
+          if (active instanceof HTMLElement && event.currentTarget.contains(active)) {
+            active.blur();
+          }
+        }}
       >
         <div className="flex h-16 shrink-0 items-center overflow-hidden px-4">
           <Link
             href="/"
             aria-label="Summarly home"
-            onClick={handleNavigate}
             className="flex w-full items-center rounded-lg"
           >
             <span className="max-w-0 overflow-hidden whitespace-nowrap text-sm font-semibold text-slate-900 opacity-0 transition-[max-width,opacity] duration-200 group-hover:max-w-[12rem] group-hover:opacity-100 group-focus-within:max-w-[12rem] group-focus-within:opacity-100">
@@ -312,7 +308,7 @@ export function AppShell({ children }: { children: ReactNode }) {
           </Link>
         </div>
         <div className="flex-1 overflow-y-auto px-2 pb-4 transition-[padding] duration-200 group-hover:px-3 group-focus-within:px-3">
-          <NavList pathname={pathname} hoverExpand onNavigate={handleNavigate} />
+          <NavList pathname={pathname} hoverExpand />
         </div>
         <div className="border-t border-slate-200 px-2 py-3 transition-[padding] duration-200 group-hover:px-3 group-focus-within:px-3">
           <SignOutButton

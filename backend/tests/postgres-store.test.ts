@@ -961,6 +961,94 @@ describe.skipIf(!process.env["DATABASE_URL"])(
       });
     });
 
+    describe("roster sync request (migration 0016)", () => {
+      async function rosterRequestedAt(groupId: string): Promise<Date | null> {
+        const result = await pool.query<{
+          roster_sync_requested_at: Date | null;
+        }>("SELECT roster_sync_requested_at FROM groups WHERE id = $1", [
+          groupId,
+        ]);
+        return result.rows[0]?.roster_sync_requested_at ?? null;
+      }
+
+      it("records a request for a MONITORED group only", async () => {
+        const store = new PostgresStore(pool);
+        const groupId = await seedGroupRow(store);
+        expect(await rosterRequestedAt(groupId)).toBeNull();
+
+        await store.requestGroupRosterSync(groupId);
+        expect(await rosterRequestedAt(groupId)).toBeInstanceOf(Date);
+
+        // Un-monitored: the SQL WHERE clause refuses the write, so
+        // un-monitoring also revokes a pending request.
+        await store.updateGroup({
+          ...(await store.getGroup(groupId))!,
+          monitored: false,
+        });
+        await pool.query(
+          "UPDATE groups SET roster_sync_requested_at = NULL WHERE id = $1",
+          [groupId],
+        );
+        await store.requestGroupRosterSync(groupId);
+        expect(await rosterRequestedAt(groupId)).toBeNull();
+
+        // Unknown id: silent no-op (the route answers 404 before this).
+        await expect(
+          store.requestGroupRosterSync(randomUUID()),
+        ).resolves.toBeUndefined();
+      });
+
+      it("PATCH enabling monitoring records the request; the route 202s", async () => {
+        const store = new PostgresStore(pool, ENCRYPTION_KEY);
+        const app = await buildApp({
+          store,
+          enqueue: noopEnqueuer,
+          cookieSecure: false,
+          logger: false,
+        });
+        await setupAdmin(app);
+        const session = await login(app);
+        const groupId = await seedGroupRow(store);
+        await store.updateGroup({
+          ...(await store.getGroup(groupId))!,
+          monitored: false,
+        });
+        expect(await rosterRequestedAt(groupId)).toBeNull();
+
+        // 409 before monitoring.
+        const refused = await app.inject({
+          method: "POST",
+          url: `/api/groups/${groupId}/roster-sync`,
+          headers: { cookie: session },
+        });
+        expect(refused.statusCode).toBe(409);
+
+        // PATCH unmonitored -> monitored requests a sync automatically.
+        const patched = await app.inject({
+          method: "PATCH",
+          url: `/api/groups/${groupId}`,
+          headers: { cookie: session },
+          payload: { monitored: true },
+        });
+        expect(patched.statusCode).toBe(200);
+        expect(await rosterRequestedAt(groupId)).toBeInstanceOf(Date);
+
+        // The manual refresh path answers 202 and keeps a request.
+        await pool.query(
+          "UPDATE groups SET roster_sync_requested_at = NULL WHERE id = $1",
+          [groupId],
+        );
+        const accepted = await app.inject({
+          method: "POST",
+          url: `/api/groups/${groupId}/roster-sync`,
+          headers: { cookie: session },
+        });
+        expect(accepted.statusCode).toBe(202);
+        expect(accepted.json()).toEqual({ ok: true });
+        expect(await rosterRequestedAt(groupId)).toBeInstanceOf(Date);
+      });
+    });
+
     describe("product upgrade surfaces (ADR 0008)", () => {
       it("persists run instructions (first request wins on create-or-find)", async () => {
         const store = new PostgresStore(pool);
@@ -1086,6 +1174,34 @@ describe.skipIf(!process.env["DATABASE_URL"])(
           "SELECT logout_requested_at FROM whatsapp_connections",
         );
         expect(cleared.rows[0]?.logout_requested_at).toBeNull();
+
+        // requestSessionReset records a LOCAL reset request (migration
+        // 0014), idempotently, without touching the logout flag.
+        await store.requestSessionReset();
+        const resetFirst = await pool.query<{
+          session_reset_requested_at: Date | null;
+          logout_requested_at: Date | null;
+        }>(
+          "SELECT session_reset_requested_at, logout_requested_at " +
+            "FROM whatsapp_connections",
+        );
+        expect(resetFirst.rows[0]?.session_reset_requested_at).toBeInstanceOf(
+          Date,
+        );
+        expect(resetFirst.rows[0]?.logout_requested_at).toBeNull();
+        await store.requestSessionReset();
+        const resetSecond = await pool.query<{
+          session_reset_requested_at: Date | null;
+        }>(
+          "SELECT session_reset_requested_at FROM whatsapp_connections",
+        );
+        expect(
+          resetSecond.rows[0]?.session_reset_requested_at?.toISOString(),
+        ).toBe(resetFirst.rows[0]?.session_reset_requested_at?.toISOString());
+        // Never part of the public connection status.
+        expect(
+          JSON.stringify(await store.getConnectionStatus()),
+        ).not.toContain("reset");
       });
 
       it("upserts and lists group members (roster refresh)", async () => {
@@ -1331,6 +1447,128 @@ describe.skipIf(!process.env["DATABASE_URL"])(
         ]);
       });
 
+      it("resolves display names from overrides, then roster names, then push names", async () => {
+        const store = new PostgresStore(pool);
+        const chatId = `${randomUUID()}@g.us`;
+        await store.upsertGroup({
+          id: randomUUID(),
+          chatId,
+          name: "Names Group",
+          monitored: true,
+          timezone: "UTC",
+          summaryTime: null,
+          historyImport: null,
+        });
+        await store.upsertGroupMembers(chatId, [
+          {
+            userId: "111@lid",
+            name: "Ana Roster",
+            phone: "111@s.whatsapp.net",
+            isAdmin: false,
+            active: true,
+          },
+          // Roster row without a name: Baileys metadata carries only JIDs.
+          {
+            userId: "222@lid",
+            name: null,
+            phone: "222@s.whatsapp.net",
+            isAdmin: false,
+            active: true,
+          },
+          // Nothing known at all: the name stays NULL.
+          {
+            userId: "333@lid",
+            name: null,
+            phone: null,
+            isAdmin: false,
+            active: true,
+          },
+        ]);
+        const connectionId = randomUUID();
+        await pool.query(
+          "INSERT INTO whatsapp_connections (id, state) VALUES ($1, 'connected')",
+          [connectionId],
+        );
+        const insertMessage = async (
+          senderId: string,
+          senderName: string | null,
+          sentAt: string,
+        ) => {
+          await pool.query(
+            `INSERT INTO messages
+               (connection_id, chat_id, whatsapp_message_id, sender_id,
+                sender_name, sent_at, body)
+             VALUES ($1, $2, $3, $4, $5, $6, 'hello')`,
+            [
+              connectionId,
+              chatId,
+              `wa-${randomUUID()}`,
+              senderId,
+              senderName,
+              new Date(sentAt),
+            ],
+          );
+        };
+        await insertMessage("111:4@s.whatsapp.net", "Ana Push", "2026-11-01T10:00:00Z");
+        await insertMessage("222:1@s.whatsapp.net", "Bea Old", "2026-11-01T09:00:00Z");
+        await insertMessage("222:2@s.whatsapp.net", "Bea Newest", "2026-11-01T11:00:00Z");
+        await insertMessage("333@lid", "Cid Push", "2026-11-01T08:00:00Z");
+
+        // Before the rename: roster name > message push name, and a
+        // nameless member falls back to its newest push name.
+        expect(
+          (await store.listGroupMembers(chatId)).map((member) => [
+            member.userId,
+            member.name,
+          ]),
+        ).toEqual([
+          ["111@lid", "Ana Roster"],
+          ["222@lid", "Bea Newest"],
+          ["333@lid", "Cid Push"],
+        ]);
+
+        await store.renameContact("111@s.whatsapp.net", "Ana Renamed");
+
+        // Members tab: override > roster name > newest push name.
+        expect(
+          (await store.listGroupMembers(chatId)).map((member) => [
+            member.userId,
+            member.name,
+          ]),
+        ).toEqual([
+          ["111@lid", "Ana Renamed"],
+          ["222@lid", "Bea Newest"],
+          ["333@lid", "Cid Push"],
+        ]);
+
+        // Chat view: the override beats the stored push name; members
+        // without an override or roster name keep their own push name.
+        expect(
+          (await store.listGroupMessages(chatId, { limit: 50 })).map(
+            (message) => message.senderName,
+          ),
+        ).toEqual([
+          "Bea Newest", // 11:00 — 222:2, own push name
+          "Ana Renamed", // 10:00 — override wins over "Ana Push"
+          "Bea Old", // 09:00 — 222:1, own push name
+          "Cid Push", // 08:00 — 333@lid, no roster name
+        ]);
+
+        // Contact messages and assistant search follow the same rule.
+        expect(
+          (
+            await store.listContactMessages(["111@lid", "111@s.whatsapp.net"], {
+              limit: 50,
+            })
+          )[0]?.senderName,
+        ).toBe("Ana Renamed");
+        expect(
+          (await store.searchMessages({ text: "hello", limit: 50 })).map(
+            (hit) => hit.senderName,
+          ),
+        ).toEqual(["Bea Newest", "Ana Renamed", "Bea Old", "Cid Push"]);
+      });
+
       it("lists group summaries with their run intervals", async () => {
         const store = new PostgresStore(pool);
         const groupId = await seedGroupRow(store);
@@ -1371,6 +1609,371 @@ describe.skipIf(!process.env["DATABASE_URL"])(
         expect(
           await store.listGroupSummaries(randomUUID(), { limit: 20 }),
         ).toEqual([]);
+      });
+    });
+
+    describe("searchMessages (assistant search)", () => {
+      /**
+       * Two monitored groups (one chat each) plus an unmonitored one.
+       * Ana is on both monitored rosters; Eve only on the unmonitored
+       * chat, whose message must never be searchable.
+       */
+      async function seedSearchFixture() {
+        const store = new PostgresStore(pool);
+        const chatA = `${randomUUID()}@g.us`;
+        const chatB = `${randomUUID()}@g.us`;
+        const chatPrivate = `${randomUUID()}@g.us`;
+        const groupA = randomUUID();
+        const groupB = randomUUID();
+        const groupPrivate = randomUUID();
+        await store.upsertGroup({
+          id: groupA,
+          chatId: chatA,
+          name: "Monitored A",
+          monitored: true,
+          timezone: "Europe/Madrid",
+          summaryTime: null,
+          historyImport: null,
+        });
+        await store.upsertGroup({
+          id: groupB,
+          chatId: chatB,
+          name: "Monitored B",
+          monitored: true,
+          timezone: "UTC",
+          summaryTime: null,
+          historyImport: null,
+        });
+        await store.upsertGroup({
+          id: groupPrivate,
+          chatId: chatPrivate,
+          name: "Private C",
+          monitored: false,
+          timezone: "UTC",
+          summaryTime: null,
+          historyImport: null,
+        });
+        await store.upsertGroupMembers(chatA, [
+          {
+            userId: "111@lid",
+            name: "Ana",
+            phone: "111@s.whatsapp.net",
+            isAdmin: false,
+            active: true,
+          },
+        ]);
+        await store.upsertGroupMembers(chatB, [
+          {
+            userId: "111@lid",
+            name: "Ana",
+            phone: "111@s.whatsapp.net",
+            isAdmin: false,
+            active: true,
+          },
+        ]);
+        await pool.query(
+          "INSERT INTO whatsapp_connections (id, state) VALUES ($1, 'connected')",
+          [randomUUID()],
+        );
+        const insert = async (
+          chatId: string,
+          senderId: string,
+          sentAt: string,
+          body: string,
+        ): Promise<string> => {
+          const result = await pool.query<{ id: string }>(
+            `INSERT INTO messages
+               (connection_id, chat_id, whatsapp_message_id, sender_id,
+                sender_name, sent_at, body)
+             SELECT id, $1, $2, $3, NULL, $4, $5
+             FROM whatsapp_connections LIMIT 1
+             RETURNING id`,
+            [chatId, `wa-${randomUUID()}`, senderId, new Date(sentAt), body],
+          );
+          return result.rows[0]?.id ?? "";
+        };
+        const launchA = await insert(
+          chatA,
+          "111:4@s.whatsapp.net",
+          "2026-11-16T09:00:00Z",
+          "El lanzamiento queda confirmado para el viernes",
+        );
+        const launchB = await insert(
+          chatB,
+          "111@lid",
+          "2026-11-16T11:00:00Z",
+          "Revisé el informe de lanzamiento",
+        );
+        const privateMessage = await insert(
+          chatPrivate,
+          "333@lid",
+          "2026-11-16T12:00:00Z",
+          "lanzamiento secreto",
+        );
+        return { store, groupA, groupB, launchA, launchB, privateMessage };
+      }
+
+      it("searches monitored groups only, newest first, with group names", async () => {
+        const { store, launchA, launchB } = await seedSearchFixture();
+        const hits = await store.searchMessages({
+          senderAliases: ["111@lid", "111@s.whatsapp.net"],
+          limit: 10,
+        });
+        expect(hits.map((hit) => hit.id)).toEqual([launchB, launchA]);
+        expect(hits[0]?.groupName).toBe("Monitored B");
+        // Device suffix on the stored sender id is normalized before
+        // matching, and the roster supplies the display name.
+        expect(hits[1]?.senderId).toBe("111:4@s.whatsapp.net");
+        expect(hits[1]?.senderName).toBe("Ana");
+        expect(hits.every((hit) => hit.body !== "lanzamiento secreto")).toBe(true);
+      });
+
+      it("filters by text (substring or trigram) and by group", async () => {
+        const { store, groupA, launchA, launchB } = await seedSearchFixture();
+        const all = await store.searchMessages({
+          senderAliases: ["111@lid", "111@s.whatsapp.net"],
+          text: "lanzamiento",
+          limit: 10,
+        });
+        expect(all.map((hit) => hit.id).sort()).toEqual(
+          [launchA, launchB].sort(),
+        );
+
+        const scoped = await store.searchMessages({
+          groupId: groupA,
+          text: "lanzamiento",
+          limit: 10,
+        });
+        expect(scoped.map((hit) => hit.id)).toEqual([launchA]);
+
+        // A typo still matches through pg_trgm similarity.
+        const fuzzy = await store.searchMessages({
+          senderAliases: ["111@lid", "111@s.whatsapp.net"],
+          text: "lanzaminto",
+          limit: 10,
+        });
+        expect(fuzzy.length).toBeGreaterThan(0);
+      });
+
+      it("applies the half-open range and returns nothing for no aliases", async () => {
+        const { store, launchA } = await seedSearchFixture();
+        const ranged = await store.searchMessages({
+          senderAliases: ["111@lid", "111@s.whatsapp.net"],
+          from: "2026-11-16T08:00:00Z",
+          to: "2026-11-16T10:00:00Z",
+          limit: 10,
+        });
+        expect(ranged.map((hit) => hit.id)).toEqual([launchA]);
+
+        expect(
+          await store.searchMessages({ senderAliases: [], limit: 10 }),
+        ).toEqual([]);
+      });
+
+      it("uses an admin rename override for the sender name", async () => {
+        const { store, launchA } = await seedSearchFixture();
+        await store.renameContact("111@s.whatsapp.net", "Ana Renamed");
+        const hits = await store.searchMessages({
+          senderAliases: ["111@s.whatsapp.net"],
+          text: "lanzamiento",
+          limit: 10,
+        });
+        const hit = hits.find((candidate) => candidate.id === launchA);
+        expect(hit?.senderName).toBe("Ana Renamed");
+      });
+
+      it("treats % and _ in the text query literally (LIKE escaping)", async () => {
+        const { store, groupA } = await seedSearchFixture();
+        const chatId = (await store.getGroup(groupA))?.chatId ?? "";
+        expect(chatId).not.toBe("");
+        const insert = async (body: string): Promise<string> => {
+          const result = await pool.query<{ id: string }>(
+            `INSERT INTO messages
+               (connection_id, chat_id, whatsapp_message_id, sender_id,
+                sender_name, sent_at, body)
+             SELECT id, $1, $2, '444@lid', NULL, $3, $4
+             FROM whatsapp_connections LIMIT 1
+             RETURNING id`,
+            [chatId, `wa-${randomUUID()}`, new Date("2026-11-16T13:00:00Z"), body],
+          );
+          return result.rows[0]?.id ?? "";
+        };
+        const percent = await insert("Descuento del 100% confirmado");
+        // Only reachable through a LIKE wildcard: no literal "%".
+        const decoyPercent = await insert("Descuento del 1000 confirmado");
+        const underscore = await insert("Archivo presupuesto_2026 enviado");
+
+        // A bare "%" would mean "match anything" without escaping; the
+        // similarity branch scores 0 for a one-character query.
+        const wildcard = await store.searchMessages({
+          groupId: groupA,
+          text: "%",
+          limit: 10,
+        });
+        expect(wildcard.map((hit) => hit.id)).toEqual([percent]);
+
+        // A bare "_" would mean "match any single character".
+        const single = await store.searchMessages({
+          groupId: groupA,
+          text: "_",
+          limit: 10,
+        });
+        expect(single.map((hit) => hit.id)).toEqual([underscore]);
+
+        // A wildcard inside a longer term does not widen the match.
+        const literalPercent = await store.searchMessages({
+          groupId: groupA,
+          text: "100%",
+          limit: 10,
+        });
+        expect(literalPercent.map((hit) => hit.id)).toEqual([percent]);
+        expect(literalPercent.map((hit) => hit.id)).not.toContain(decoyPercent);
+
+        // Ordinary text is unaffected: the escape is a no-op for it, so
+        // substring and trigram matching keep working.
+        const normal = await store.searchMessages({
+          groupId: groupA,
+          text: "lanzamiento",
+          limit: 10,
+        });
+        expect(normal.length).toBeGreaterThan(0);
+      });
+    });
+
+    describe("deleteAllData (guarded danger-zone action)", () => {
+      it("removes captured data and keeps administrative state", async () => {
+        const store = new PostgresStore(pool, ENCRYPTION_KEY);
+
+        // Administrative state that must SURVIVE the deletion.
+        await store.setAdmin({
+          passwordHash: "hash",
+          recoveryCodeHashes: new Set(["recovery-hash"]),
+        });
+        await store.createSession("session-token");
+        await store.setProviderConfig({
+          provider: "mock",
+          model: "mock-1",
+          baseUrl: null,
+          apiKey: null,
+        });
+        await store.setDefaultTimezone("America/Caracas");
+        await store.setDefaultDateFormat("YYYY-MM-DD");
+        await store.setConnectionStatus({
+          state: "connected",
+          since: "2026-11-01T00:00:00Z",
+          lastMessageAt: "2026-11-01T11:00:00Z",
+          linking: null,
+          check: null,
+        });
+
+        // Captured data.
+        const groupId = randomUUID();
+        const chatId = `${randomUUID()}@g.us`;
+        await store.upsertGroup({
+          id: groupId,
+          chatId,
+          name: "Delete Group",
+          monitored: true,
+          timezone: "Europe/Madrid",
+          summaryTime: null,
+          historyImport: null,
+        });
+        await store.upsertGroupMembers(chatId, [
+          {
+            userId: "111@s.whatsapp.net",
+            name: "Ana",
+            phone: "111@s.whatsapp.net",
+            isAdmin: false,
+            active: true,
+          },
+          {
+            userId: "222@lid",
+            name: "Beto",
+            phone: null,
+            isAdmin: true,
+            active: true,
+          },
+        ]);
+        await store.renameContact("111@s.whatsapp.net", "Ana Override");
+        const { run } = await store.createOrFindRun({
+          groupId,
+          interval: INTERVAL,
+          kind: "manual",
+        });
+        await store.saveSummary({
+          id: randomUUID(),
+          runId: run.id,
+          provider: "mock",
+          model: "mock-1",
+          result: RESULT,
+          createdAt: "2026-11-02T00:00:00Z",
+        });
+        const connection = await pool.query<{ id: string }>(
+          "SELECT id FROM whatsapp_connections LIMIT 1",
+        );
+        const connectionId = connection.rows[0]?.id ?? "";
+        await pool.query(
+          `INSERT INTO messages
+             (connection_id, chat_id, whatsapp_message_id, sender_id,
+              sender_name, sent_at, body)
+           VALUES ($1, $2, $3, '111@s.whatsapp.net', 'Ana', $4, 'hello')`,
+          [
+            connectionId,
+            chatId,
+            `wa-${randomUUID()}`,
+            new Date("2026-11-01T10:00:00Z"),
+          ],
+        );
+
+        const deleted = await store.deleteAllData();
+        expect(deleted).toEqual({
+          groups: 1,
+          messages: 1,
+          summaryRuns: 1,
+          summaries: 1,
+          groupMembers: 2,
+          contactOverrides: 1,
+        });
+
+        // Captured data is gone.
+        const remaining = await pool.query<{
+          groups: number;
+          messages: number;
+          summary_runs: number;
+          summaries: number;
+          group_members: number;
+          contact_overrides: number;
+        }>(
+          `SELECT (SELECT count(*) FROM groups)::int AS groups,
+                  (SELECT count(*) FROM messages)::int AS messages,
+                  (SELECT count(*) FROM summary_runs)::int AS summary_runs,
+                  (SELECT count(*) FROM summaries)::int AS summaries,
+                  (SELECT count(*) FROM group_members)::int AS group_members,
+                  (SELECT count(*) FROM contact_overrides)::int AS contact_overrides`,
+        );
+        expect(remaining.rows[0]).toEqual({
+          groups: 0,
+          messages: 0,
+          summary_runs: 0,
+          summaries: 0,
+          group_members: 0,
+          contact_overrides: 0,
+        });
+
+        // Administrative state is kept (settings, provider, admin,
+        // sessions, connection row) and only last_message_at is cleared.
+        expect(await store.getAdmin()).not.toBeNull();
+        expect(await store.validateSession("session-token")).toBe(true);
+        expect(await store.getProviderConfig()).not.toBeNull();
+        expect(await store.getDefaultTimezone()).toBe("America/Caracas");
+        expect(await store.getDefaultDateFormat()).toBe("YYYY-MM-DD");
+        const status = await store.getConnectionStatus();
+        expect(status.state).toBe("connected");
+        expect(status.lastMessageAt).toBeNull();
+        const connectionCount = await pool.query<{ n: number }>(
+          "SELECT count(*)::int AS n FROM whatsapp_connections",
+        );
+        expect(connectionCount.rows[0]?.n).toBe(1);
       });
     });
   },

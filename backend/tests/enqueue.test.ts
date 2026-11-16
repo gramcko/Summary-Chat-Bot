@@ -35,8 +35,10 @@ class FakeQueue implements SummaryQueueLike {
   readonly states = new Map<string, string>();
   readonly removed: string[] = [];
   readonly added: AddedCall[] = [];
+  readonly obliterated: Array<{ force?: boolean }> = [];
   removeResult = 1;
   failOnGet = false;
+  failOnObliterate = false;
 
   async getJob(
     jobId: string,
@@ -61,6 +63,12 @@ class FakeQueue implements SummaryQueueLike {
     this.added.push({ name, data, opts });
     this.states.set(opts?.jobId ?? "auto", "waiting");
     return { id: opts?.jobId };
+  }
+
+  async obliterate(opts?: { force?: boolean }): Promise<void> {
+    if (this.failOnObliterate) throw new Error("Connection is closed.");
+    this.obliterated.push(opts ?? {});
+    this.states.clear();
   }
 
   async close(): Promise<void> {}
@@ -150,6 +158,46 @@ describe("RedisSummaryEnqueuer (job-id semantics)", () => {
     const queue = new FakeQueue();
     await new RedisSummaryEnqueuer({ queue }).enqueueSummaryRun(RUN_ID);
     expect(queue.added[0]?.opts?.backoff.delay).toBe(30000);
+  });
+});
+
+describe("RedisSummaryEnqueuer.purgeAll (danger-zone queue cleanup)", () => {
+  it("obliterates the whole queue with force", async () => {
+    const queue = new FakeQueue();
+    queue.states.set(RUN_ID, "waiting");
+
+    await makeEnqueuer(queue).purgeAll();
+
+    // BullMQ 6.5.2: obliterate({ force: true }) removes waiting,
+    // active, delayed, and retained jobs.
+    expect(queue.obliterated).toEqual([{ force: true }]);
+    expect(queue.states.size).toBe(0);
+  });
+
+  it("propagates obliterate errors so the route can log them", async () => {
+    const queue = new FakeQueue();
+    queue.failOnObliterate = true;
+    await expect(makeEnqueuer(queue).purgeAll()).rejects.toThrow(
+      "Connection is closed.",
+    );
+  });
+
+  it("no-ops safely when the queue surface cannot obliterate", async () => {
+    const queue: SummaryQueueLike = {
+      async getJob() {
+        return undefined;
+      },
+      async remove() {
+        return 0;
+      },
+      async add() {
+        return {};
+      },
+      async close() {},
+    };
+    await expect(
+      new RedisSummaryEnqueuer({ queue }).purgeAll(),
+    ).resolves.toBeUndefined();
   });
 });
 

@@ -17,12 +17,20 @@ export const GROUP_ID = "4f9d2b6a-1c31-4a2f-9a3e-9c0a1b2c3d4e";
  */
 export class RecordingEnqueuer implements SummaryEnqueuer {
   readonly enqueued: string[] = [];
+  /** How many times the queue purge was requested (danger-zone action). */
+  purged = 0;
   failWith: Error | undefined;
+  failPurgeWith: Error | undefined;
 
   async enqueueSummaryRun(runId: string): Promise<EnqueueOutcome> {
     if (this.failWith !== undefined) throw this.failWith;
     this.enqueued.push(runId);
     return "enqueued";
+  }
+
+  async purgeAll(): Promise<void> {
+    if (this.failPurgeWith !== undefined) throw this.failPurgeWith;
+    this.purged += 1;
   }
 }
 
@@ -31,6 +39,7 @@ export const noopEnqueuer: SummaryEnqueuer = {
   async enqueueSummaryRun(): Promise<EnqueueOutcome> {
     return "already-queued";
   },
+  async purgeAll(): Promise<void> {},
 };
 
 export async function makeApp(): Promise<{

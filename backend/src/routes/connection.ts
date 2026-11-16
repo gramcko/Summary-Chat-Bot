@@ -23,6 +23,19 @@ export function registerConnectionRoutes(
   });
 
   /**
+   * Deletes the LOCAL WhatsApp connection data (migration 0014). Unlike
+   * logout, this skips the remote revoke entirely: the bot-worker purges
+   * the Baileys session directory, finalizes the row, and re-arms
+   * linking so a fresh QR appears — the recovery path for a partial or
+   * invalid session. Captured data and settings are untouched.
+   * Idempotent: 202 also while a request is pending.
+   */
+  app.post("/api/connection/reset", async (_request, reply) => {
+    await store.requestSessionReset();
+    return reply.status(202).send({ ok: true });
+  });
+
+  /**
    * Requests a live session health check. The backend only records the
    * request; the bot-worker performs the bounded probe and writes the
    * result, which `GET /api/connection` exposes as `check`.

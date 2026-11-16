@@ -11,6 +11,7 @@ import {
   type ContactMessage,
   type ContactSummary,
   type DateFormat,
+  type DeleteAllDataCounts,
   type GroupMember,
 } from "@summarly/contracts";
 import { decryptSecret, encryptSecret } from "./crypto.js";
@@ -23,6 +24,8 @@ import {
   type CreateRunInput,
   type GroupMemberInput,
   type ListMessagesOptions,
+  type MessageSearchHit,
+  type MessageSearchOptions,
   type ProviderRecord,
   type Store,
 } from "./store.js";
@@ -133,6 +136,12 @@ type ContactMessageRow = MessageRow & {
   group_name: string;
 };
 
+type MessageSearchRow = MessageRow & {
+  group_id: string;
+  group_name: string;
+  score: number;
+};
+
 /**
  * Shared contact aggregation (list + detail). A contact's canonical key
  * is the PN JID when known, else the LID; aliases are every JID form
@@ -205,6 +214,16 @@ const GROUP_COLUMNS =
   "history_import_status, history_import_requested_at, " +
   "history_import_started_at, history_import_finished_at, " +
   "history_import_imported_count, history_import_error";
+
+/**
+ * Escapes the LIKE metacharacters of a user-supplied search term so it is
+ * matched literally inside `%term%` (paired with `ESCAPE '\'`).
+ * Ordinary text is returned unchanged, which keeps the pg_trgm index
+ * usable for it.
+ */
+function escapeLikePattern(value: string): string {
+  return value.replace(/[\\%_]/g, (char) => `\\${char}`);
+}
 
 function toAdminRecord(row: AdminRow): AdminRecord {
   return {
@@ -557,6 +576,23 @@ export class PostgresStore implements Store {
     return (result.rowCount ?? 0) > 0;
   }
 
+  async requestGroupRosterSync(groupId: string): Promise<void> {
+    // On-demand roster refresh (migration 0016): the backend only
+    // records the request; the bot-worker's session-control poll claims
+    // it, fetches the group metadata and syncs the roster. `monitored =
+    // true` is part of the statement (ADR 0004 boundary): an
+    // un-monitored or unknown group never gets a request recorded, so
+    // un-monitoring also revokes a pending one at claim time.
+    // Idempotent: repeated requests keep a single pending flag (the
+    // latest timestamp wins).
+    await this.pool.query(
+      `UPDATE groups
+       SET roster_sync_requested_at = now(), updated_at = now()
+       WHERE id = $1 AND monitored = true`,
+      [groupId],
+    );
+  }
+
   // ---- Summary runs ----
 
   async createOrFindRun(
@@ -783,6 +819,54 @@ export class PostgresStore implements Store {
     return dateFormat;
   }
 
+  // ---- Guarded data deletion (danger zone) ----
+
+  async deleteAllData(): Promise<DeleteAllDataCounts> {
+    // ONE transaction: either every captured row is removed or none is
+    // (AGENTS.md data integrity). Dependency order matters:
+    // summaries -> summary_runs (FK to groups, RESTRICT) -> messages ->
+    // group_members -> contact_overrides -> groups.
+    //
+    // Deliberately NOT deleted: app_settings, ai_provider_configs,
+    // admin_credentials, admin_sessions, whatsapp_connections (only its
+    // last_message_at is cleared), and the Baileys session directory
+    // (that is bot-worker file storage, never touched here).
+    const client = await this.pool.connect();
+    try {
+      await client.query("BEGIN");
+      const summaries = await client.query("DELETE FROM summaries");
+      const summaryRuns = await client.query("DELETE FROM summary_runs");
+      const messages = await client.query("DELETE FROM messages");
+      const groupMembers = await client.query("DELETE FROM group_members");
+      const contactOverrides = await client.query(
+        "DELETE FROM contact_overrides",
+      );
+      const groups = await client.query("DELETE FROM groups");
+      await client.query(
+        `UPDATE whatsapp_connections
+         SET last_message_at = NULL, updated_at = now()`,
+      );
+      await client.query("COMMIT");
+      return {
+        summaries: summaries.rowCount ?? 0,
+        summaryRuns: summaryRuns.rowCount ?? 0,
+        messages: messages.rowCount ?? 0,
+        groupMembers: groupMembers.rowCount ?? 0,
+        contactOverrides: contactOverrides.rowCount ?? 0,
+        groups: groups.rowCount ?? 0,
+      };
+    } catch (error) {
+      try {
+        await client.query("ROLLBACK");
+      } catch {
+        // The original error is the one worth propagating.
+      }
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+
   // ---- WhatsApp connection status ----
 
   async getConnectionStatus(): Promise<ConnectionStatus> {
@@ -917,6 +1001,20 @@ export class PostgresStore implements Store {
     );
   }
 
+  async requestSessionReset(): Promise<void> {
+    // Single-row invariant (see updateConnectionLinking). LOCAL-ONLY
+    // reset for a partial/invalid session: the bot-worker purges the
+    // session directory and re-arms linking; no remote revoke happens
+    // here or in the worker's reset flow. Idempotent: an already-pending
+    // request keeps its original timestamp (COALESCE). The bot-worker
+    // consumes the flag and clears it together with any pending logout.
+    await this.pool.query(
+      `UPDATE whatsapp_connections
+       SET session_reset_requested_at = COALESCE(session_reset_requested_at, now()),
+           updated_at = now()`,
+    );
+  }
+
   async clearLogoutRequest(): Promise<void> {
     // Single-row invariant (see updateConnectionLinking). This is the
     // bot-worker's consume path for the admin's logout request.
@@ -966,11 +1064,39 @@ export class PostgresStore implements Store {
   }
 
   async listGroupMembers(chatId: string): Promise<GroupMember[]> {
+    // Display-name precedence (mirrors InMemoryStore.listGroupMembers):
+    // admin override, then the roster name, then the newest message push
+    // name captured for that sender in this chat. Without the last step
+    // a member whose roster row has no name (Baileys group metadata
+    // carries only JIDs) would render as a raw LID/phone even though a
+    // push name was observed. `gm.name` itself is the override-aware
+    // roster name; ordering uses the same resolved name so the list
+    // sorts by what the admin actually sees. The LATERAL runs once per
+    // roster row and rides the (chat_id, sent_at) index with LIMIT 1,
+    // so it stays cheap for a roster-sized result set.
     const result = await this.pool.query<MemberRow>(
-      `SELECT user_id, name, phone, is_admin, active, updated_at
-       FROM group_members
-       WHERE chat_id = $1
-       ORDER BY is_admin DESC, name ASC NULLS LAST, user_id ASC`,
+      `SELECT gm.user_id,
+              COALESCE(o.name, gm.name, latest.sender_name) AS name,
+              gm.phone, gm.is_admin, gm.active, gm.updated_at
+       FROM group_members gm
+       LEFT JOIN contact_overrides o
+         ON o.contact_id = COALESCE(gm.phone, gm.user_id)
+       LEFT JOIN LATERAL (
+         SELECT m.sender_name
+         FROM messages m
+         WHERE m.chat_id = gm.chat_id
+           AND m.sender_name IS NOT NULL
+           AND (
+             regexp_replace(m.sender_id, ':.*@', '@') = gm.user_id
+             OR regexp_replace(m.sender_id, ':.*@', '@') = gm.phone
+           )
+         ORDER BY m.sent_at DESC
+         LIMIT 1
+       ) latest ON true
+       WHERE gm.chat_id = $1
+       ORDER BY gm.is_admin DESC,
+                COALESCE(o.name, gm.name, latest.sender_name) ASC NULLS LAST,
+                gm.user_id ASC`,
       [chatId],
     );
     return result.rows.map((row) => ({
@@ -1008,7 +1134,10 @@ export class PostgresStore implements Store {
     // (chat_id, sent_at) index accordingly.
     const result = await this.pool.query<MessageRow>(
       `SELECT m.id, m.sent_at, m.sender_id,
-              COALESCE(m.sender_name, gm.name) AS sender_name,
+              -- Display-name precedence: admin contact override / current
+              -- roster name first, the push name stored with the message
+              -- only as a fallback (a rename must win over old captures).
+              COALESCE(gm.name, m.sender_name) AS sender_name,
               m.body, m.message_type
        FROM messages m
        LEFT JOIN LATERAL (
@@ -1124,9 +1253,11 @@ export class PostgresStore implements Store {
     if (options.cursor !== undefined && cursor === undefined) {
       throw new Error("invalid message cursor");
     }
+    // Same display-name precedence as listGroupMessages: the override-aware
+    // roster name wins over the push name stored with the message.
     const result = await this.pool.query<ContactMessageRow>(
       `SELECT m.id, m.sent_at, m.sender_id,
-              COALESCE(m.sender_name, gm.name) AS sender_name,
+              COALESCE(gm.name, m.sender_name) AS sender_name,
               m.body, m.message_type,
               g.id AS group_id, g.name AS group_name
        FROM messages m
@@ -1171,6 +1302,80 @@ export class PostgresStore implements Store {
       groupId: row.group_id,
       groupName: row.group_name,
     })) as ContactMessage[];
+  }
+
+  async searchMessages(
+    options: MessageSearchOptions,
+  ): Promise<MessageSearchHit[]> {
+    // Same privacy boundary as listContactMessages: the join to
+    // `groups.monitored = true` means an unmonitored chat's messages are
+    // never returned, even if the caller passes its group id.
+    //
+    // Fuzzy matching uses pg_trgm (`similarity`), installed by migration
+    // 0013 together with the GIN trigram index that keeps ILIKE with a
+    // leading wildcard from degrading into a per-row trigram scan.
+    //
+    // `%`/`_`/`\` in `text` are escaped so the ILIKE clause matches the
+    // user's characters literally instead of acting as wildcards. The
+    // escape is a no-op for ordinary text, so the trigram index still
+    // applies to it; `similarity()` receives the unescaped text because
+    // pg_trgm treats those characters as ordinary trigram input.
+    //
+    // Display names follow the same precedence as listGroupMessages
+    // (`COALESCE(gm.name, m.sender_name)`): overrides win over push names.
+    const text = options.text?.trim();
+    const textParam = text === undefined || text === "" ? null : text;
+    const likeParam = textParam === null ? null : escapeLikePattern(textParam);
+    const result = await this.pool.query<MessageSearchRow>(
+      `SELECT m.id, m.sent_at, m.sender_id,
+              COALESCE(gm.name, m.sender_name) AS sender_name,
+              m.body, g.id AS group_id, g.name AS group_name,
+              CASE WHEN $3::text IS NULL THEN 0
+                   ELSE similarity(m.body, $3::text) END AS score
+       FROM messages m
+       JOIN groups g ON g.chat_id = m.chat_id AND g.monitored = true
+       LEFT JOIN LATERAL (
+         SELECT COALESCE(o.name, member.name) AS name
+         FROM group_members member
+         LEFT JOIN contact_overrides o
+           ON o.contact_id = COALESCE(member.phone, member.user_id)
+         WHERE member.chat_id = m.chat_id
+           AND (
+             member.user_id = regexp_replace(m.sender_id, ':.*@', '@')
+             OR member.phone = regexp_replace(m.sender_id, ':.*@', '@')
+           )
+         ORDER BY (member.user_id = regexp_replace(m.sender_id, ':.*@', '@')) DESC
+         LIMIT 1
+       ) gm ON true
+       WHERE ($1::uuid IS NULL OR g.id = $1)
+         AND ($2::text[] IS NULL OR
+              regexp_replace(m.sender_id, ':.*@', '@') = ANY($2::text[]))
+         AND ($3::text IS NULL OR
+              m.body ILIKE '%' || $7::text || '%' ESCAPE '\\' OR
+              similarity(m.body, $3::text) > 0.15)
+         AND ($4::timestamptz IS NULL OR m.sent_at >= $4)
+         AND ($5::timestamptz IS NULL OR m.sent_at < $5)
+       ORDER BY score DESC, m.sent_at DESC, m.id DESC
+       LIMIT $6`,
+      [
+        options.groupId ?? null,
+        options.senderAliases ?? null,
+        textParam,
+        options.from === undefined ? null : new Date(options.from),
+        options.to === undefined ? null : new Date(options.to),
+        options.limit,
+        likeParam,
+      ],
+    );
+    return result.rows.map((row) => ({
+      id: row.id,
+      groupId: row.group_id,
+      groupName: row.group_name,
+      sentAt: row.sent_at.toISOString(),
+      senderId: row.sender_id ?? "unknown",
+      senderName: row.sender_name,
+      body: row.body,
+    }));
   }
 
   private toContactSummary(row: ContactRow): ContactSummary {

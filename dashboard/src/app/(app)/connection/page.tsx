@@ -1,7 +1,7 @@
 "use client";
 
 import type { ConnectionStatus } from "@summarly/contracts";
-import { useEffect, useState, type ReactNode } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 import { PairingDetails } from "@/components/connection/PairingDetails";
 import { useNotifications } from "@/components/notifications/NotificationProvider";
 import { useAppDateFormat, useAppTimeZone } from "@/components/TimeZoneProvider";
@@ -123,11 +123,11 @@ export default function ConnectionPage() {
   const timeZone = useAppTimeZone();
   const dateFormat = useAppDateFormat();
   /**
-   * After an unlink the bot worker re-arms pairing within seconds. The status
-   * can still read "connected" for a moment (the request is asynchronous), so
-   * keep polling until a non-connected state is observed — then the normal rule
-   * takes over. Without this the screen would stop polling right before the new
-   * QR / pairing code appears.
+   * After an unlink or a local connection-data reset the bot worker re-arms
+   * pairing within seconds. The status can still read "connected" for a moment
+   * (the request is asynchronous), so keep polling until a non-connected state
+   * is observed — then the normal rule takes over. Without this the screen
+   * would stop polling right before the new QR / pairing code appears.
    */
   const [refreshAfterUnlink, setRefreshAfterUnlink] = useState(false);
   const [refreshAfterTest, setRefreshAfterTest] = useState(false);
@@ -147,6 +147,13 @@ export default function ConnectionPage() {
   const [unlinkError, setUnlinkError] = useState<string | null>(null);
   const [feedback, setFeedback] = useState<string | null>(null);
   const [actionError, setActionError] = useState<ApiError | null>(null);
+
+  // Local connection-data reset (Danger zone): distinct from the unlink above.
+  const [resetOpen, setResetOpen] = useState(false);
+  const [resetting, setResetting] = useState(false);
+  const [resetError, setResetError] = useState<string | null>(null);
+  const [resetFeedback, setResetFeedback] = useState<string | null>(null);
+  const resetInFlight = useRef(false);
 
   // Poll for a live QR / pairing code while pairing; stop once connected.
   useEffect(() => {
@@ -225,7 +232,7 @@ export default function ConnectionPage() {
       // Watch for the re-armed pairing payload the bot worker publishes.
       setRefreshAfterUnlink(true);
       setFeedback(
-        "Unlink requested. The bot worker will end the session; a new pairing code will appear here automatically.",
+        "Unlink requested. The bot worker will end the session; a fresh QR code or pairing code will appear here automatically.",
       );
       reload();
     } catch (cause) {
@@ -233,6 +240,45 @@ export default function ConnectionPage() {
     } finally {
       setUnlinking(false);
     }
+  }
+
+  /**
+   * Danger zone: delete the *local* session credentials and linking state
+   * (`POST /api/connection/reset`). No remote logout is sent; captured data
+   * and settings are kept. The bot worker re-arms pairing, so force polling
+   * until the new QR / pairing code shows up.
+   */
+  async function handleResetConnection(): Promise<void> {
+    if (resetInFlight.current) return;
+    resetInFlight.current = true;
+    setResetting(true);
+    setResetError(null);
+    try {
+      await api.resetConnection();
+      setResetOpen(false);
+      setRefreshAfterUnlink(true);
+      setResetFeedback(
+        "Connection data deleted. The bot worker will issue a fresh QR code or pairing code here automatically. If this device still appears in WhatsApp → Linked devices, remove it on the phone.",
+      );
+      notify({
+        title: "Connection data deleted",
+        description:
+          "A fresh QR code or pairing code will appear here automatically.",
+        tone: "success",
+      });
+      reload();
+    } catch (cause) {
+      setResetError(toApiError(cause).message);
+    } finally {
+      resetInFlight.current = false;
+      setResetting(false);
+    }
+  }
+
+  /** Opens the local connection-data reset dialog from either entry point. */
+  function openResetDialog(): void {
+    setResetError(null);
+    setResetOpen(true);
   }
 
   const linking = status?.linking ?? null;
@@ -345,9 +391,12 @@ export default function ConnectionPage() {
                     End session / Unlink
                   </Button>
                   <p className="mt-2 text-xs text-slate-500">
-                    Ends the linked WhatsApp session. Captured messages and
-                    summaries stay in the database; the bot worker stops
-                    capturing until you link a device again.
+                    Ends the linked WhatsApp session with a remote logout, so
+                    the device is removed from WhatsApp → Linked devices.
+                    Captured messages and summaries stay in the database; the
+                    bot worker stops capturing until you link a device again.
+                    If the stored session is broken and no QR code appears, use
+                    Delete connection data in the Danger zone below instead.
                   </p>
                 </div>
               </CardBody>
@@ -379,12 +428,54 @@ export default function ConnectionPage() {
                     className="h-10 w-10 animate-spin rounded-full border-2 border-slate-200 border-t-brand-600"
                   />
                   <p role="status" className="text-sm font-medium text-slate-800">
-                    Waiting for the pairing code…
+                    Waiting for a QR code or pairing code…
                   </p>
                   <p className="max-w-xs text-xs text-slate-500">
                     The bot worker publishes a QR code or pairing code while it
                     is linking. This page checks every few seconds.
                   </p>
+                  <div
+                    role="note"
+                    aria-label="Troubleshooting a missing link code"
+                    className="mt-1 w-full max-w-sm rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-left"
+                  >
+                    <p className="text-xs font-semibold text-amber-900">
+                      No code after a while?
+                    </p>
+                    <p className="mt-1 text-xs text-amber-800">
+                      The stored session may be invalid. The bot worker can get
+                      stuck reconnecting with stale credentials and never
+                      publish a new code. Deleting the local connection data
+                      clears those credentials so a fresh link can be issued;
+                      ending the session also logs the device out of WhatsApp.
+                    </p>
+                    <div className="mt-3 flex flex-wrap gap-2">
+                      <Button
+                        variant="secondary"
+                        size="sm"
+                        onClick={() => {
+                          setUnlinkError(null);
+                          setConfirmOpen(true);
+                        }}
+                        disabled={unlinking}
+                      >
+                        End session / Unlink
+                      </Button>
+                      <Button
+                        variant="secondary"
+                        size="sm"
+                        onClick={openResetDialog}
+                        disabled={resetting}
+                      >
+                        Delete connection data
+                      </Button>
+                    </div>
+                    <p className="mt-2 text-xs text-amber-800">
+                      Pairing-code linking requires{" "}
+                      <code className="font-mono">WA_PHONE_NUMBER</code> on the
+                      bot-worker; without it WhatsApp shows a QR code instead.
+                    </p>
+                  </div>
                 </div>
               ) : (
                 <PairingDetails
@@ -398,6 +489,46 @@ export default function ConnectionPage() {
         </div>
       )}
 
+      {status === null ? null : (
+        <Card className="border-red-200/90">
+          <CardHeader
+            title="Danger zone"
+            description="Reset the local WhatsApp connection data when the stored session is partial or invalid."
+          />
+          <CardBody className="space-y-4">
+            <div className="space-y-2 text-sm leading-6 text-slate-700">
+              <p>
+                <strong>Deletes:</strong> the local WhatsApp session
+                credentials and linking state stored on this server.
+              </p>
+              <p>
+                <strong>Keeps:</strong> captured groups, messages, summaries,
+                and settings.
+              </p>
+              <p>
+                Use this when the session is partial or invalid and no QR code
+                appears. Unlike <em>End session / Unlink</em>, no remote logout
+                is sent: if the device still appears in{" "}
+                <em>WhatsApp → Linked devices</em>, remove it on the phone.
+              </p>
+            </div>
+            <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
+              <Button
+                variant="danger"
+                onClick={openResetDialog}
+                disabled={resetting}
+              >
+                Delete WhatsApp connection data
+              </Button>
+              <p className="text-xs leading-5 text-slate-500">
+                You will be asked to confirm. A fresh QR code or pairing code
+                appears right after.
+              </p>
+            </div>
+          </CardBody>
+        </Card>
+      )}
+
       {actionError === null ? null : (
         <Alert tone="error" title="Could not request the unlink">
           {actionError.message}
@@ -408,6 +539,14 @@ export default function ConnectionPage() {
         {feedback === null ? null : (
           <Alert tone="success" title="Unlink requested">
             {feedback}
+          </Alert>
+        )}
+      </div>
+
+      <div aria-live="polite">
+        {resetFeedback === null ? null : (
+          <Alert tone="success" title="Connection data deleted">
+            {resetFeedback}
           </Alert>
         )}
       </div>
@@ -429,6 +568,33 @@ export default function ConnectionPage() {
         onCancel={() => {
           setConfirmOpen(false);
           setUnlinkError(null);
+        }}
+      />
+
+      <ConfirmDialog
+        open={resetOpen}
+        title="Delete the WhatsApp connection data?"
+        description={
+          <div className="space-y-2">
+            <p>
+              The local WhatsApp session credentials and linking state are
+              deleted, and a fresh QR code or pairing code is issued. Captured
+              messages, summaries, and settings are kept.
+            </p>
+            <p className="text-xs text-slate-500">
+              No remote logout is sent. If the device still appears in
+              WhatsApp → Linked devices, remove it on the phone.
+            </p>
+          </div>
+        }
+        confirmLabel="Delete connection data"
+        loading={resetting}
+        error={resetError}
+        onConfirm={() => void handleResetConnection()}
+        onCancel={() => {
+          if (resetting) return;
+          setResetOpen(false);
+          setResetError(null);
         }}
       />
     </div>

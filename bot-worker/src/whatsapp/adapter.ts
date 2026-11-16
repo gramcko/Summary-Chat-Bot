@@ -131,7 +131,13 @@ export type HistoryFailureReason =
  * - "recent": allow the initial RECENT/INITIAL_BOOTSTRAP sync to complete
  *   (required by WhatsApp's protocol state machine) but DROP the payload.
  * - "full": also request/capture the initial/full history for monitored
- *   groups (opt-in backfill; requires a re-link to trigger).
+ *   groups (opt-in backfill). It only applies once the session has
+ *   successfully OPENED at least once (persisted `session_established`,
+ *   migration 0015): a fresh registration — and the first reconnect
+ *   right after the QR scan — must use the registration-safe config,
+ *   because a socket that asks for full history there is closed with
+ *   428 before any QR/open. `full` therefore takes effect on a later
+ *   reconnect or worker restart.
  */
 export type HistorySyncMode = "off" | "recent" | "full";
 
@@ -263,6 +269,16 @@ export interface WhatsAppAdapter {
    * ("ignore stale history events", ADR 0007).
    */
   releaseHistoryChat(chatJid: string): void;
+  /**
+   * Sets the persistent "session has opened at least once" flag
+   * (migration 0015, ADR 0007). The service loads it from PostgreSQL
+   * before every connect and sets it to true after `connection: open`;
+   * the adapter uses it — NOT `creds.me` — to decide the connect-time
+   * history options. `creds.me` exists right after the QR scan, while
+   * the first post-scan reconnect must still use the registration-safe
+   * config (WhatsApp closes it with 428 otherwise).
+   */
+  setSessionEstablished(established: boolean): void;
   /**
    * Sets the monitored chats eligible for the opt-in initial history
    * capture (mode "full"). The service refreshes this set on start and

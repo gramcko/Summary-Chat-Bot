@@ -103,6 +103,38 @@ export function mergeOlderMessages<T extends { id: string }>(
   return merged;
 }
 
+export interface MessageDayGroup<T> {
+  /** Day label, also used as the React key (unique per group). */
+  heading: string;
+  /** Messages of that day, in the caller's order. */
+  messages: T[];
+}
+
+/**
+ * Splits an oldest-first list into consecutive day groups. The chat view uses
+ * this to render one sticky day heading per group: a heading nested inside a
+ * single message `<li>` would only stick for that message's height.
+ *
+ * `heading` renders the label for an instant (time zone and date format are the
+ * caller's concern); messages that render the same label share a group.
+ */
+export function groupMessagesByDay<T extends { sentAt: string }>(
+  ordered: readonly T[],
+  heading: (sentAt: string) => string,
+): MessageDayGroup<T>[] {
+  const groups: MessageDayGroup<T>[] = [];
+  for (const message of ordered) {
+    const label = heading(message.sentAt);
+    const last = groups[groups.length - 1];
+    if (last !== undefined && last.heading === label) {
+      last.messages.push(message);
+      continue;
+    }
+    groups.push({ heading: label, messages: [message] });
+  }
+  return groups;
+}
+
 /** Display name for a message sender (`senderName` is PII from WhatsApp). */
 export function senderLabel(message: ApiMessage): string {
   return message.senderName ?? message.senderId;

@@ -1,14 +1,25 @@
 "use client";
 
 import type { GroupMember } from "@summarly/contracts";
+import { useEffect, useState } from "react";
 import { useAppDateFormat, useAppTimeZone } from "@/components/TimeZoneProvider";
+import { Alert } from "@/components/ui/Alert";
 import { Badge } from "@/components/ui/Badges";
+import { Button } from "@/components/ui/Button";
 import { Card } from "@/components/ui/Card";
 import { EmptyState, ErrorState } from "@/components/ui/States";
 import { SkeletonRows } from "@/components/ui/Skeleton";
-import { api } from "@/lib/api";
+import { api, toApiError } from "@/lib/api";
 import { useResource } from "@/lib/hooks";
 import { formatDateTime } from "@/lib/time";
+
+/** How often the roster is re-fetched while a refresh request is in flight. */
+const ROSTER_REFRESH_POLL_MS = 2_000;
+/**
+ * Upper bound for the polling window: the bot worker may be disconnected or
+ * WhatsApp may not answer, and the tab must not poll forever.
+ */
+const ROSTER_REFRESH_WINDOW_MS = 15_000;
 
 function formatPhone(phone: string | null): string | null {
   if (phone === null) return null;
@@ -42,6 +53,58 @@ export function MembersTab({ groupId }: { groupId: string }) {
   const members = useResource(() => api.groupMembers(groupId), [groupId]);
   const { data, error, loading, reload } = members;
 
+  /** `POST /groups/:id/roster-sync` is in flight. */
+  const [requesting, setRequesting] = useState(false);
+  /** The poll window that follows a successful request. */
+  const [polling, setPolling] = useState(false);
+  /** Whether the roster was empty when the refresh was requested. */
+  const [awaitingFirstRoster, setAwaitingFirstRoster] = useState(false);
+  const [feedback, setFeedback] = useState<string | null>(null);
+  const [requestError, setRequestError] = useState<string | null>(null);
+
+  // The sync itself runs in the bot worker, so the tab observes the result:
+  // re-fetch every couple of seconds until the window closes.
+  useEffect(() => {
+    if (!polling) return;
+    const deadline = Date.now() + ROSTER_REFRESH_WINDOW_MS;
+    const interval = window.setInterval(() => {
+      reload();
+      if (Date.now() >= deadline) setPolling(false);
+    }, ROSTER_REFRESH_POLL_MS);
+    return () => window.clearInterval(interval);
+  }, [polling, reload]);
+
+  // An empty roster fills in as soon as the sync lands — stop early then.
+  useEffect(() => {
+    if (!polling || !awaitingFirstRoster) return;
+    if (data !== null && data.length > 0) {
+      setPolling(false);
+      setFeedback("Roster updated.");
+    }
+  }, [polling, awaitingFirstRoster, data]);
+
+  async function refreshMembers(): Promise<void> {
+    if (requesting || polling) return;
+    setRequesting(true);
+    setRequestError(null);
+    setFeedback(null);
+    setAwaitingFirstRoster((data ?? []).length === 0);
+    try {
+      await api.requestRosterSync(groupId);
+      setFeedback("Roster refresh requested. It can take a few seconds.");
+      setPolling(true);
+    } catch (cause) {
+      const failure = toApiError(cause);
+      setRequestError(
+        failure.code === "conflict"
+          ? "This group is not monitored, so its roster cannot be refreshed. Turn monitoring on in the Settings tab."
+          : failure.message,
+      );
+    } finally {
+      setRequesting(false);
+    }
+  }
+
   if (loading && data === null) {
     return <SkeletonRows label="Loading members…" rows={4} />;
   }
@@ -70,12 +133,39 @@ export function MembersTab({ groupId }: { groupId: string }) {
   const active = data.filter((member) => member.active);
   const left = data.length - active.length;
 
+  const refreshButton = (
+    <Button
+      variant="secondary"
+      size="sm"
+      loading={requesting || polling}
+      onClick={() => void refreshMembers()}
+      className="shrink-0"
+    >
+      Refresh members
+    </Button>
+  );
+
+  const refreshFeedback = (
+    <>
+      {feedback === null ? null : <Alert tone="success">{feedback}</Alert>}
+      {requestError === null ? null : (
+        <Alert tone="error" title="Could not refresh the member list">
+          {requestError}
+        </Alert>
+      )}
+    </>
+  );
+
   if (data.length === 0) {
     return (
-      <EmptyState
-        title="No members captured yet"
-        description="The bot worker records the group roster from WhatsApp. It appears here after the next sync of this chat; WhatsApp does not replay membership history."
-      />
+      <div className="space-y-3">
+        <EmptyState
+          title="No members captured yet"
+          description="The bot worker records the group roster from WhatsApp. Use “Refresh members” to ask it for the current roster; it appears here once the sync completes. WhatsApp does not replay membership history."
+          action={refreshButton}
+        />
+        {refreshFeedback}
+      </div>
     );
   }
 
@@ -87,11 +177,15 @@ export function MembersTab({ groupId }: { groupId: string }) {
 
   return (
     <div className="space-y-3">
-      <p className="text-xs text-slate-500">
-        {active.length} active · {left} left the group. Names come from the
-        WhatsApp contacts and message push names observed by the bot worker;
-        members without a known name show their phone number when available.
-      </p>
+      <div className="flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between">
+        <p className="text-xs text-slate-500">
+          {active.length} active · {left} left the group. Names come from the
+          WhatsApp contacts and message push names observed by the bot worker;
+          members without a known name show their phone number when available.
+        </p>
+        {refreshButton}
+      </div>
+      {refreshFeedback}
       <Card>
         <ul className="divide-y divide-slate-100">
           {sorted.map((member) => (

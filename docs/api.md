@@ -82,29 +82,33 @@ in-memory throttle.
 | GET | `/api/connection` | `ConnectionStatus` | Non-secret WhatsApp connection state. `linking` carries the pairing QR + expiry while linking (see session control below); `null` otherwise. `check` carries the latest live session health probe (`pending`/`ok`/`failed`), or `null` when none was requested. |
 | GET | `/api/groups` | `Group[]` | Monitored groups. |
 | GET | `/api/groups/:id` | `Group` | Single group (detail screen). `400` non-UUID id; `404` unknown. |
-| GET | `/api/groups/:id/members` | `GroupMember[]` | Best-effort roster snapshot (admin names first, then alphabetical). `[]` when no chat is discovered yet. **Monitored groups only** (fix round B, H-1): `409` with `"Group is not monitored."` when the group is not monitored (same privacy boundary as history import), `404` unknown group. Names/JIDs are PII (admin-only data). |
+| GET | `/api/groups/:id/members` | `GroupMember[]` | Best-effort roster snapshot (admin names first, then alphabetical). `[]` when no chat is discovered yet. `name` follows the display-name precedence: admin contact override, then roster name, then the newest message push name captured for that sender in the chat (see display names below). **Monitored groups only** (fix round B, H-1): `409` with `"Group is not monitored."` when the group is not monitored (same privacy boundary as history import), `404` unknown group. Names/JIDs are PII (admin-only data). |
 | GET | `/api/groups/:id/messages` | `ApiMessagePage` | Chat view, newest first (`items` + `nextCursor`; the cursor is emitted only when another page truly exists). Query: `from`/`to` half-open `[from, to)` ISO instants, `limit` 1-200 (default 50), `cursor` = previous `nextCursor`. `400` on an invalid range, limit, or cursor (including a non-UUID cursor id); `404` unknown group. |
 | GET | `/api/groups/:id/summaries` | `GroupSummary[]` | Past summaries, newest first, each with the run `interval` and `provider`/`model`. Query: `limit` 1–200 (default 20). |
 | GET | `/api/contacts` | `ContactSummary[]` | People who are active members of at least one **monitored** group, aggregated by canonical identity (PN JID when known, else LID). Includes their monitored groups, message count, and last message time. Names/phones/JIDs are PII (admin-only). |
 | GET | `/api/contacts/:id` | `ContactDetail` | One contact plus its JID `aliases`. `404` unknown contact. `:id` is the canonical contact id (a JID, not a UUID) and must be URL-encoded. |
-| PATCH | `/api/contacts/:id` | `ContactDetail` | Admin display-name override (`{ "name": "..." }`, 1–300 chars). It wins over roster/WhatsApp names and survives automatic refreshes. `400` invalid name; `404` unknown contact. |
+| PATCH | `/api/contacts/:id` | `ContactDetail` | Admin display-name override (`{ "name": "..." }`, 1–300 chars). It is the display-name source of truth: it wins over roster/WhatsApp names, applies immediately to the Members tab and to already-captured group/contact/search messages, and survives automatic refreshes. `400` invalid name; `404` unknown contact. |
 | GET | `/api/contacts/:id/messages` | `ContactMessagePage` | Messages sent by the contact across monitored groups, newest first, each with `groupId`/`groupName`. Same `from`/`to`/`limit`/`cursor` semantics as the group chat view; `404` unknown contact. |
-| PATCH | `/api/groups/:id` | `Group` | Partial update. `summaryTime: null` clears the daily cutoff. `historyImport` is system-managed and never changed by PATCH. |
+| PATCH | `/api/groups/:id` | `Group` | Partial update. `summaryTime: null` clears the daily cutoff. `historyImport` is system-managed and never changed by PATCH. Enabling monitoring (`monitored: false → true`) also requests a roster sync (best-effort; see below). |
 | POST | `/api/groups/:id/history-import` | `Group` (202/200) | Request a WhatsApp history import (opt-in, ADR 0007). `409` when the group is not monitored; `200` when an import is already pending/running; `202` otherwise (including re-requests after done/failed). |
+| POST | `/api/groups/:id/roster-sync` | `{ "ok": true }` (202) | Requests an on-demand roster refresh (the Members tab "refresh" path, migration 0016). The bot-worker fetches the group metadata on its next session-control poll (≈3 s) and syncs `group_members`; the roster itself is read back from `GET /api/groups/:id/members`. `404` unknown group; `409` when the group is not monitored. Idempotent (one pending request per group); the refresh is best-effort and may come back empty. |
 | POST | `/api/summary-runs` | `SummaryRun` (201/200) | Create-or-find (see conventions). Optional `instructions` (1–2000 chars) steers how the summary is produced (see custom instructions below). Non-terminal runs are queued for the summary-worker (`generate-summary`, docs/decisions/0003); enqueue failures leave the run `pending` and are repaired by reconciliation. |
 | GET | `/api/summary-runs` | `RunListResponse` | Newest first. `nextCursor` is `null` in the skeleton. |
 | GET | `/api/summary-runs/:id` | `SummaryRun` | |
 | POST | `/api/summary-runs/:id/retry` | `SummaryRun` | `failed → pending` **and re-enqueues the run**; no-op for `pending`/`processing`; `409` for `completed` (regeneration is an open decision). |
 | POST | `/api/connection/logout` | `{ "ok": true }` (202) | End/unlink the WhatsApp session (see session control below). Idempotent: `202` also while a request is pending. |
+| POST | `/api/connection/reset` | `{ "ok": true }` (202) | **Delete connection data**: deletes LOCAL session data only (no remote revoke), keeps captured data/settings, and re-arms QR linking (see session control below). Idempotent. |
 | POST | `/api/connection/test` | `{ "ok": true }` (202) | Requests a live session health probe. The bot-worker performs a bounded WhatsApp query and writes the result to `ConnectionStatus.check`; poll `GET /api/connection` for `pending` → `ok`/`failed`. |
 | GET | `/api/summaries/:id` | `Summary` | `404` until the summary-worker has completed the run. |
 | GET | `/api/summary-runs/:id/summary` | `Summary` | `404` for an unknown run or a run without a summary yet. |
+| POST | `/api/assistant/chat` | `AssistantChatResponse` | Dashboard assistant (see below). Body `{ "messages": [{ "role": "user"\|"assistant", "content": "..." }] }`, 1–20 turns, content 1–4000 chars. Tools, citations, and runs are deterministic; when the saved provider is `google-gemini` with a readable key, a model call may classify the question and, for data-backed intents, a second call may rewrite the deterministic reply text (citations and runs always come from the backend). Rate limited per IP (20 requests/minute): `429` with code `rate_limited` and `Retry-After`. |
 | GET | `/api/settings/ai-provider` | `ProviderConfigPublic` | `404` when unconfigured. Never returns key material. |
 | PUT | `/api/settings/ai-provider` | `ProviderConfigPublic` | Upsert. `apiKey`: omit = keep, string = replace, `null` = clear. |
 | GET | `/api/settings/default-timezone` | `DefaultTimezoneSettings` | Global IANA zone for NEW groups and the summary form's initial value. |
 | PUT | `/api/settings/default-timezone` | `DefaultTimezoneSettings` | Sets the global default zone (`{ "timezone": "America/Caracas" }`). `400` unknown zone. |
 | GET | `/api/settings/default-date-format` | `DefaultDateFormatSettings` | Global date pattern for dashboard timestamps. Defaults to `DD/MM/YYYY`. |
 | PUT | `/api/settings/default-date-format` | `DefaultDateFormatSettings` | Sets the pattern (`{ "dateFormat": "YYYY-MM-DD" }`). `400` unknown pattern. |
+| POST | `/api/admin/delete-all-data` | `DeleteAllDataResponse` | Guarded **danger-zone** action: permanently deletes ALL captured data (see below). Body must be exactly `{ "confirmation": "DELETE ALL" }` — anything else is `400 validation_error`. |
 
 AI provider strings (ADR 0005): enter `provider: "google-gemini"` with
 `model: "gemini-3.8-flash"` (or the cheaper `gemini-3.5-flash-lite`) to
@@ -238,17 +242,37 @@ pagination):
   stay in the roster as `active: false` history. Sorted admin names
   first, then alphabetical. **Names** are resolved from WhatsApp
   contacts and message push names (group metadata carries only JIDs);
-  when no name has been observed, `phone` (the PN JID) is a fallback
-  identifier for LID-addressed groups, and `null` means the member is
-  LID-only. **Rosters are monitored-only** (fix round B, H-1): both the
+  the precedence is admin contact override → roster name → newest
+  message push name observed for that sender in the chat (see display
+  names below). When no name has been observed at all, `phone` (the PN
+  JID) is a fallback identifier for LID-addressed groups, and `null`
+  means the member is LID-only. **Rosters are monitored-only** (fix
+  round B, H-1): both the
   bot-worker's roster sync and this endpoint require the group to be
   monitored (`409` otherwise), matching the ADR 0004 opt-in boundary —
-  un-monitoring revokes roster access too.
+  un-monitoring revokes roster access too. **On-demand refresh**
+  (migration 0016): enabling monitoring, or `POST
+  /api/groups/:id/roster-sync`, records a request that the bot-worker
+  consumes on its next session-control poll (≈3 s). This is how a group
+  discovered before it was monitored gets its first roster — discovery
+  only syncs monitored chats, so without the request the Members tab
+  stays empty until a membership event. The refresh is best-effort: an
+  empty result is "no data" (nothing is deactivated) and the admin can
+  request it again.
+- **Display names** (`GroupMember.name`, `ApiMessage.senderName`,
+  `ContactMessage.senderName`, `MessageSearchHit.senderName`) follow one
+  precedence: the admin contact override (`PATCH /api/contacts/:id`,
+  `contact_overrides`) is the source of truth, then the current roster
+  name (matched by LID/PN alias, device suffix ignored), and only then
+  the push name stored with the message. A rename therefore applies to
+  the Members tab and to already-captured group/contact/search messages
+  immediately — the stored push name is a fallback for senders with no
+  override and no roster name, never an override of its own.
 - `ApiMessage` keeps the stored body verbatim (including `senderName`,
-  the WhatsApp push name captured with the message). When the captured
-  push name is missing, the API falls back to the member's current
-  roster name (matched by LID/PN alias), so older messages still show
-  the name once it is learned. The chat view paginates newest-first;
+  the WhatsApp push name captured with the message). `senderName` is
+  resolved with the display-name precedence above, so older messages
+  still show the current name once it is learned or renamed. The chat
+  view paginates newest-first;
   `from`/`to` filter the half-open instant range `[from, to)`.
 - `GroupSummary` is a `Summary` plus the run's `interval` (what period
   the summary covers) and its `provider`/`model`.
@@ -286,12 +310,158 @@ end the session:
   **bot-worker consumes the flag** (ends the session, clears the stored
   credentials, resets the connection state) and clears the request.
   Until then the request stays pending and visible in server state.
+- `POST /api/connection/reset` records the admin's **DELETE CONNECTION
+  DATA** request (`session_reset_requested_at`) and answers `202
+  {"ok": true}` — idempotent, an already-pending request keeps its
+  original timestamp. This is the recovery path for a partial or invalid
+  session (the worker keeps reconnecting with stale credentials and never
+  shows a QR):
+  - it deletes **LOCAL session data only** — the bot-worker purges the
+    Baileys session directory (known auth artefacts) and clears the
+    linking state, but **does NOT revoke the linked device remotely**;
+  - captured messages, groups, summaries, settings, and the AI provider
+    configuration are **kept** — this is not a data deletion;
+  - it **re-arms QR linking**, so a fresh pairing QR appears through the
+    normal flow without restarting the worker;
+  - a reset **wins over a pending logout**: the bot-worker consumes the
+    reset flag and clears `logout_requested_at` in the same write, so no
+    remote logout runs afterwards.
+
+  Prefer END/UNLINK when the session is healthy and you want the device
+  revoked on WhatsApp; use DELETE CONNECTION DATA when the local session
+  is broken. The request flag is internal: the dashboard keeps polling
+  `GET /api/connection` for the resulting state/QR.
 - `POST /api/connection/test` requests a **live session health check**.
   The bot-worker performs a bounded probe (socket open + a lightweight
   WhatsApp USync status query) and writes `ConnectionStatus.check` with
   `status` (`pending`/`ok`/`failed`), latency, timestamp, and a safe error
   code. It never returns message content or credentials. Poll
   `GET /api/connection` until the status leaves `pending`.
+
+## Dashboard assistant
+
+`POST /api/assistant/chat` answers a small set of questions about data
+the admin can already see. **Tools, citations, and runs are
+deterministic**: intents are matched by keywords (English and Spanish) or
+selected by an optional Gemini classification, entity names are matched
+case/accent-insensitively against monitored groups and observed
+contacts, and the same request against the same data produces the same
+evidence. An optional Gemini composer may rewrite the reply text, but it
+can only restate facts from the deterministic draft.
+
+| Intent | Example | Behaviour |
+| --- | --- | --- |
+| `summary` | "do a summary on Equipo Ventas today" / "resumen de Equipo Ventas ayer" | Creates (or reuses) a **manual** run for the group's time zone over the requested period — `today`, `yesterday`, `last 24 hours` (default), `last 7 days` — and enqueues it. Returns `pendingRunId` + a `run` citation; the reply links the dashboard path `/runs/<id>`. |
+| `contact_groups` | "which groups does Ana participate in?" / "en qué grupos participa Ana" | Lists the contact's **monitored** groups with `group` citations. |
+| `search_messages` | "when did Ana say something about the launch?" / "cuándo dijo Ana ..." | Searches captured messages (`ILIKE` or `pg_trgm` similarity, migration 0013) across monitored groups, optionally scoped to a named group, and quotes up to 10 hits with local timestamps and `message` citations. |
+| `help` | anything else | Explains what the assistant can do. |
+
+Rules and limitations:
+
+- Only **monitored** groups and messages from them are visible. A group
+  that is not monitored is not a candidate, so it can be neither
+  summarized nor searched; contacts are derived from monitored rosters.
+- If no group/contact matches, or several entities match equally well,
+  the reply asks for a clarification and lists the candidates (group
+  candidates also come back as citations). Longest name match wins.
+- Contacts also match on single words of their stored name (length ≥ 3,
+  accent-insensitive): "which groups does Carlos participate in?" resolves
+  "Carlos Luis Gramcko". Two contacts sharing a word ("Carlos") is
+  ambiguous and asks for a clarification. Groups match by full name only,
+  so a generic word from a group name never selects a group.
+- The search term is matched literally: `%`, `_`, and `\` in the query are
+  escaped for `ILIKE` (`ESCAPE '\'`) and passed unescaped to `pg_trgm`
+  `similarity`, so ordinary text keeps using the trigram index
+  (migration 0013).
+- Summary runs are durable first and enqueued best-effort: a queue
+  outage leaves the run `pending` (reconciliation re-enqueues it) and
+  the reply says so. Repeating the same request returns the same run.
+- The endpoint is rate limited in memory per IP (20 requests/minute,
+  fixed window): `429` with code `rate_limited` and a `Retry-After`
+  header. It is an operational guard, not business data.
+- **Optional Gemini planner.** When the saved provider is
+  `google-gemini` with a readable key, one bounded (≤10 s) classification
+  call may run first. It receives only the question and the **names** of
+  monitored groups and named contacts — no message bodies, JIDs, phones,
+  summaries, or session data — and returns a validated plan
+  (`intent`, `groupName`, `contactName`, `query`, `period`). The service
+  then requires exact case-insensitive matches against the same monitored
+  data; a missing/unknown/ambiguous name, a timeout, a provider error, an
+  invalid plan, or a non-Gemini/unconfigured provider all fall back to the
+  deterministic parser. Planner output never becomes reply text.
+- **Optional Gemini answer composer.** After the deterministic reply
+  exists, `summary`, `contact_groups`, and `search_messages` turns may
+  send one bounded (≤10 s) rewrite request to the same provider. It
+  receives the question, the draft reply (which may contain short
+  message excerpts), and citation metadata (`kind`, group name,
+  timestamp) — never message ids, JIDs, phone numbers, run records, or
+  the key. The fixed instruction allows only facts from the draft and
+  forbids adding groups, people, dates, messages, decisions, or
+  citations. Citations and `pendingRunId` always come from the
+  deterministic draft; a `summary` reply keeps `/runs/<id>` even if the
+  model drops it. `help` and `clarify` are never composed. Null, error,
+  empty, or over-long output keeps the template reply. At most two
+  Gemini calls run per turn.
+- Message bodies, names, JIDs, question text, prompts, and reply text are
+  never logged; `assistant_chat` records the intent, `plannerSource`
+  (`gemini`/`heuristic`), citation count, and duration,
+  `assistant_answer` records the answer `source` (`gemini`/`template`),
+  duration, and a safe fallback reason, and planner/composer failures log
+  a fixed reason code only.
+
+## Delete all captured data (danger zone)
+
+`POST /api/admin/delete-all-data` permanently removes every piece of
+captured conversation data in ONE PostgreSQL transaction:
+
+- `summaries`, `summary_runs`, `messages`, `group_members`,
+  `contact_overrides`, and `groups`;
+- `whatsapp_connections.last_message_at` is reset to `NULL`.
+
+The request must carry the exact confirmation:
+
+```json
+{ "confirmation": "DELETE ALL" }
+```
+
+Anything else (missing body, `DELETE`, different casing, surrounding
+spaces) is `400 validation_error` and deletes nothing. The response
+reports the exact removed row counts and nothing else:
+
+```json
+{
+  "ok": true,
+  "deleted": {
+    "groups": 3,
+    "messages": 1820,
+    "summaryRuns": 42,
+    "summaries": 42,
+    "groupMembers": 57,
+    "contactOverrides": 2
+  }
+}
+```
+
+**Deliberately kept** (this is not a factory reset):
+
+- `app_settings` (default time zone and date format),
+- `ai_provider_configs` (the saved provider configuration and key),
+- `admin_credentials` and `admin_sessions` (the admin stays logged in),
+- the `whatsapp_connections` row and its state (the session stays
+  linked; only `lastMessageAt` is cleared),
+- the Baileys session directory on disk (the WhatsApp link is NOT
+  unlinked - use `POST /api/connection/logout` to revoke it remotely, or
+  `POST /api/connection/reset` to purge the local session only).
+
+After the database transaction the backend asks the queue producer to
+purge the summary queue (BullMQ `obliterate({ force: true })`). A purge
+failure is logged (`failed to purge summary queue after data deletion`,
+error name only) and does **not** fail the request: the captured rows are
+already gone, and a stale queued job cannot find its run. The success log
+line is `data_deleted` with the counts only — never content, names, or
+JIDs.
+
+Database backups taken before the deletion still contain the data.
 
 ## Environment variables
 
@@ -349,16 +519,24 @@ end the session:
 - Captured messages (`messages`) are **retained until deleted**. There is
   **no automatic expiry in the MVP**; the retention policy has not been
   productized yet (tracked for Phase E/F — see `docs/decisions/0004` §11).
-- The explicit deletion path today is the operator CLI
-  `npm run purge-messages -w @summarly/backend` (by group id, chat id,
-  and/or a `--before <ISO date>` cutoff; destructive, with a typed
-  confirmation or an explicit `--yes` flag; it reports counts only).
-  It covers **both** captured messages and the `group_members` roster
-  (fix round A, audit M-2/M5 — names/JIDs live in both): a
-  chat-scoped purge removes the full roster of those chats (including
-  departed members kept as history), a date-only purge removes roster
-  rows last updated before the cutoff, and an empty resolved scope
-  deletes nothing. There is no API or dashboard deletion endpoint yet.
+- The explicit deletion paths today are:
+  - the operator CLI `npm run purge-messages -w @summarly/backend` (by
+    group id, chat id, and/or a `--before <ISO date>` cutoff;
+    destructive, with a typed confirmation or an explicit `--yes` flag;
+    it reports counts only). It covers **both** captured messages and
+    the `group_members` roster (fix round A, audit M-2/M5 — names/JIDs
+    live in both): a chat-scoped purge removes the full roster of those
+    chats (including departed members kept as history), a date-only
+    purge removes roster rows last updated before the cutoff, and an
+    empty resolved scope deletes nothing.
+  - the guarded API action `POST /api/admin/delete-all-data` (exact
+    confirmation `DELETE ALL`), which deletes ALL captured data —
+    groups, messages, summary runs, summaries, rosters, and contact
+    overrides — in one transaction and clears the connection's
+    `lastMessageAt`. Settings, the AI provider configuration, admin
+    credentials/sessions, the WhatsApp connection row/state, and the
+    Baileys session directory are kept (see "Delete all captured data"
+    above). There is no dashboard button for it yet.
 - **Database backups are as sensitive as the WhatsApp session volume**:
   dumps contain full conversations and phone-number-bearing sender JIDs.
   Encrypt and rotate dumps, restrict their access — and remember that

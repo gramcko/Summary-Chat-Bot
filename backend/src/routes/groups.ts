@@ -175,6 +175,26 @@ export function registerGroupRoutes(
     if (stored === undefined) {
       throw new HttpError(404, "not_found", "Group not found.");
     }
+    // Monitoring enabled (unmonitored -> monitored): ask the bot-worker
+    // for a roster refresh. Discovery only syncs monitored chats, so a
+    // group discovered before the admin opted in has no roster — without
+    // this request the Members tab stays empty until a membership event
+    // (migration 0016). Best-effort: the group update already committed,
+    // so a failed request write must never turn the PATCH into an error
+    // (the admin can retry via POST /api/groups/:id/roster-sync).
+    if (!group.monitored && stored.monitored) {
+      try {
+        await store.requestGroupRosterSync(stored.id);
+      } catch (error) {
+        request.log.warn(
+          {
+            groupId: stored.id,
+            reason: error instanceof Error ? error.name : "unknown",
+          },
+          "failed to request roster sync after enabling monitoring",
+        );
+      }
+    }
     return stored;
   });
 
@@ -214,5 +234,37 @@ export function registerGroupRoutes(
     // (review CR-m1). 202 = this call performed the transition; 200 =
     // an import was already in flight.
     return reply.status(result.changed ? 202 : 200).send(result.group);
+  });
+
+  /**
+   * Requests an on-demand roster sync for the group (migration 0016):
+   * the manual "refresh members" path behind the Members tab. The
+   * backend only records the request; the bot-worker's session-control
+   * poll claims it, fetches the group metadata from WhatsApp and syncs
+   * `group_members`. Best-effort by construction — the roster can still
+   * come back empty (metadata unavailable), which is why the endpoint
+   * answers 202 rather than a roster.
+   *
+   * - 404 unknown group;
+   * - 409 when the group is NOT monitored (rosters are monitored-only,
+   *   the same privacy boundary as the history import);
+   * - 202 `{ "ok": true }` when the request was recorded. Idempotent:
+   *   repeated requests collapse into one pending flag.
+   */
+  app.post("/api/groups/:id/roster-sync", async (request, reply) => {
+    const { id } = GroupParams.parse(request.params);
+    const group = await store.getGroup(id);
+    if (group === undefined) {
+      throw new HttpError(404, "not_found", "Group not found.");
+    }
+    if (!group.monitored) {
+      throw new HttpError(
+        409,
+        "conflict",
+        "Group must be monitored before syncing its roster.",
+      );
+    }
+    await store.requestGroupRosterSync(id);
+    return reply.status(202).send({ ok: true });
   });
 }

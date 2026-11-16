@@ -1,7 +1,16 @@
 import { randomUUID } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import { ApiError, Group, type GroupHistoryImport } from "@summarly/contracts";
-import { GROUP_ID, login, makeApp, seedGroup, setupAdmin } from "./helpers.js";
+import { buildApp } from "../src/app.js";
+import { InMemoryStore } from "../src/lib/store.js";
+import {
+  GROUP_ID,
+  login,
+  makeApp,
+  noopEnqueuer,
+  seedGroup,
+  setupAdmin,
+} from "./helpers.js";
 
 async function authedApp() {
   const ctx = await makeApp();
@@ -415,5 +424,176 @@ describe("history import: consent + response semantics (audit SA-M1, review CR-m
       },
     });
     expect((await store.requestHistoryImport(finishedId))?.changed).toBe(true);
+  });
+});
+
+describe("roster sync request (POST /api/groups/:id/roster-sync, migration 0016)", () => {
+  const UNKNOWN_ID = "00000000-0000-4000-8000-000000000000";
+
+  function requestRosterSync(
+    app: Awaited<ReturnType<typeof makeApp>>["app"],
+    session: string,
+    id: string,
+  ) {
+    return app.inject({
+      method: "POST",
+      url: `/api/groups/${id}/roster-sync`,
+      headers: { cookie: session },
+    });
+  }
+
+  it("404s for an unknown group id", async () => {
+    const { app, session } = await authedApp();
+    const res = await requestRosterSync(app, session, UNKNOWN_ID);
+    expect(res.statusCode).toBe(404);
+    expect(ApiError.parse(res.json()).error.code).toBe("not_found");
+  });
+
+  it("409s when the group is not monitored (privacy boundary)", async () => {
+    const { app, store, session } = await authedApp();
+    await store.updateGroup({
+      ...(await store.getGroup(GROUP_ID))!,
+      monitored: false,
+    });
+    const res = await requestRosterSync(app, session, GROUP_ID);
+    expect(res.statusCode).toBe(409);
+    const error = ApiError.parse(res.json()).error;
+    expect(error.code).toBe("conflict");
+    expect(error.message).toBe(
+      "Group must be monitored before syncing its roster.",
+    );
+    expect(store.pendingRosterSyncGroupIds).toEqual([]);
+  });
+
+  it("202 accepts the request and records it (no flag on the contract)", async () => {
+    const { app, store, session } = await authedApp();
+    const res = await requestRosterSync(app, session, GROUP_ID);
+    expect(res.statusCode).toBe(202);
+    expect(res.json()).toEqual({ ok: true });
+    expect(store.pendingRosterSyncGroupIds).toEqual([GROUP_ID]);
+
+    // The control flag is internal: it is not part of the Group shape.
+    const group = await app.inject({
+      method: "GET",
+      url: `/api/groups/${GROUP_ID}`,
+      headers: { cookie: session },
+    });
+    const parsed = Group.parse(group.json());
+    expect(Object.keys(parsed)).not.toContain("rosterSyncRequestedAt");
+  });
+
+  it("is idempotent: repeated requests keep ONE pending flag", async () => {
+    const { app, store, session } = await authedApp();
+    expect((await requestRosterSync(app, session, GROUP_ID)).statusCode).toBe(202);
+    expect((await requestRosterSync(app, session, GROUP_ID)).statusCode).toBe(202);
+    expect(store.pendingRosterSyncGroupIds).toEqual([GROUP_ID]);
+  });
+});
+
+describe("roster sync on monitoring enable (PATCH /api/groups/:id)", () => {
+  it("requests a sync when the group transitions to monitored", async () => {
+    const { app, store, session } = await authedApp();
+    await store.updateGroup({
+      ...(await store.getGroup(GROUP_ID))!,
+      monitored: false,
+    });
+    expect(store.pendingRosterSyncGroupIds).toEqual([]);
+
+    const res = await app.inject({
+      method: "PATCH",
+      url: `/api/groups/${GROUP_ID}`,
+      headers: { cookie: session },
+      payload: { monitored: true },
+    });
+    expect(res.statusCode).toBe(200);
+    expect(Group.parse(res.json()).monitored).toBe(true);
+    expect(store.pendingRosterSyncGroupIds).toEqual([GROUP_ID]);
+  });
+
+  it("does not request one when the group was already monitored", async () => {
+    const { app, store, session } = await authedApp();
+    const res = await app.inject({
+      method: "PATCH",
+      url: `/api/groups/${GROUP_ID}`,
+      headers: { cookie: session },
+      payload: { timezone: "America/Bogota" },
+    });
+    expect(res.statusCode).toBe(200);
+    expect(store.pendingRosterSyncGroupIds).toEqual([]);
+  });
+
+  it("does not request one when monitoring is disabled", async () => {
+    const { app, store, session } = await authedApp();
+    const res = await app.inject({
+      method: "PATCH",
+      url: `/api/groups/${GROUP_ID}`,
+      headers: { cookie: session },
+      payload: { monitored: false },
+    });
+    expect(res.statusCode).toBe(200);
+    expect(store.pendingRosterSyncGroupIds).toEqual([]);
+  });
+
+  it("still returns the updated group when the request write fails", async () => {
+    // The group update already committed: a failed roster-sync request
+    // must never turn a successful PATCH into a 500 (best-effort).
+    class FailingRosterSyncStore extends InMemoryStore {
+      override async requestGroupRosterSync(): Promise<void> {
+        throw new Error("database unavailable");
+      }
+    }
+    const store = new FailingRosterSyncStore();
+    await store.upsertGroup({
+      id: GROUP_ID,
+      chatId: null,
+      name: "Test Group",
+      monitored: false,
+      timezone: "Europe/Madrid",
+      summaryTime: null,
+      historyImport: null,
+    });
+    const app = await buildApp({
+      store,
+      enqueue: noopEnqueuer,
+      cookieSecure: false,
+      logger: false,
+    });
+    await setupAdmin(app);
+    const session = await login(app);
+
+    const res = await app.inject({
+      method: "PATCH",
+      url: `/api/groups/${GROUP_ID}`,
+      headers: { cookie: session },
+      payload: { monitored: true },
+    });
+    expect(res.statusCode).toBe(200);
+    expect(Group.parse(res.json()).monitored).toBe(true);
+    expect((await store.getGroup(GROUP_ID))?.monitored).toBe(true);
+  });
+});
+
+describe("Store.requestGroupRosterSync", () => {
+  it("records a request only for monitored groups", async () => {
+    const { store } = await authedApp();
+    // Unknown group: silent no-op (the route answers 404 before this).
+    await store.requestGroupRosterSync(randomUUID());
+    expect(store.pendingRosterSyncGroupIds).toEqual([]);
+
+    // Unmonitored group: the SQL WHERE clause refuses it.
+    await store.updateGroup({
+      ...(await store.getGroup(GROUP_ID))!,
+      monitored: false,
+    });
+    await store.requestGroupRosterSync(GROUP_ID);
+    expect(store.pendingRosterSyncGroupIds).toEqual([]);
+
+    // Monitored group: recorded.
+    await store.updateGroup({
+      ...(await store.getGroup(GROUP_ID))!,
+      monitored: true,
+    });
+    await store.requestGroupRosterSync(GROUP_ID);
+    expect(store.pendingRosterSyncGroupIds).toEqual([GROUP_ID]);
   });
 });

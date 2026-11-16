@@ -3,6 +3,7 @@ import { test } from "node:test";
 import type { ApiMessage } from "@summarly/contracts";
 import {
   defaultMessageRange,
+  groupMessagesByDay,
   mergeOlderMessages,
   resolveMessageRange,
   senderLabel,
@@ -128,6 +129,26 @@ test("merging older pages appends without duplicating ids", () => {
     ["a", "b", "c"],
   );
   assert.equal(mergeOlderMessages(merged, []).length, 3);
+});
+
+test("grouping keeps consecutive same-day messages in one group, in order", () => {
+  const ordered = [
+    message("a", "2026-11-02T09:00:00.000Z"),
+    message("b", "2026-11-02T18:00:00.000Z"),
+    message("c", "2026-11-03T08:00:00.000Z"),
+  ];
+
+  const groups = groupMessagesByDay(ordered, (sentAt) => sentAt.slice(0, 10));
+
+  assert.deepEqual(
+    groups.map((group) => group.heading),
+    ["2026-11-02", "2026-11-03"],
+  );
+  assert.deepEqual(
+    groups.map((group) => group.messages.map((entry) => entry.id)),
+    [["a", "b"], ["c"]],
+  );
+  assert.deepEqual(groupMessagesByDay([], () => "unused"), []);
 });
 
 test("sender label prefers the push name", () => {

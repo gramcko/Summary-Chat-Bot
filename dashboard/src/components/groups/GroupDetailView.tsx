@@ -27,6 +27,10 @@ const TAB_ITEMS: readonly TabDefinition[] = [
   { id: "settings", label: "Settings" },
 ];
 
+function isTabId(value: string): boolean {
+  return TAB_ITEMS.some((item) => item.id === value);
+}
+
 /** Group detail: summaries, members, chat history, and monitoring settings. */
 export function GroupDetailView({ groupId }: { groupId: string }) {
   const group = useResource(() => api.group(groupId), [groupId]);
@@ -34,6 +38,13 @@ export function GroupDetailView({ groupId }: { groupId: string }) {
   const current = group.data;
   const importSummary =
     current === null ? null : summarizeHistoryImport(current.historyImport);
+
+  // `?tab=messages` (from an assistant citation) opens that section. Read after
+  // mount so the page needs no Suspense boundary; unknown values are ignored.
+  useEffect(() => {
+    const value = new URLSearchParams(window.location.search).get("tab");
+    if (value !== null && isTabId(value)) setTab(value);
+  }, []);
 
   // Keep the import banner and the Settings card live while the bot-worker is
   // importing (same behavior as the groups list). Polling stops as soon as the

@@ -13,6 +13,7 @@ import { api, toApiError, type ApiError } from "@/lib/api";
 import {
   MESSAGE_PAGE_SIZE,
   defaultMessageRange,
+  groupMessagesByDay,
   mergeOlderMessages,
   resolveMessageRange,
   type MessageRangeInput,
@@ -51,10 +52,19 @@ export function MessagesTab({
   const [error, setError] = useState<ApiError | null>(null);
   const [olderError, setOlderError] = useState<ApiError | null>(null);
   const requestId = useRef(0);
+  const listRef = useRef<HTMLDivElement | null>(null);
+  // After a first page renders, pin the view to the newest (bottom) message.
+  const pinToBottom = useRef(true);
+  // Scroll metrics captured before "Load older" prepends a page.
+  const olderAnchor = useRef<{ scrollHeight: number; scrollTop: number } | null>(
+    null,
+  );
 
   async function loadFirstPage(range: AppliedRange): Promise<void> {
     requestId.current += 1;
     const id = requestId.current;
+    pinToBottom.current = true;
+    olderAnchor.current = null;
     setLoading(true);
     setError(null);
     setOlderError(null);
@@ -127,6 +137,11 @@ export function MessagesTab({
         limit: MESSAGE_PAGE_SIZE,
       });
       if (requestId.current !== id) return;
+      const element = listRef.current;
+      olderAnchor.current =
+        element === null
+          ? null
+          : { scrollHeight: element.scrollHeight, scrollTop: element.scrollTop };
       setMessages((current) => mergeOlderMessages(current, page.items));
       setNextCursor(page.nextCursor);
     } catch (cause) {
@@ -136,8 +151,29 @@ export function MessagesTab({
     }
   }
 
+  // The list is oldest-first, so the newest message is at the bottom: pin the
+  // view there on the first page, and hold the reader's place when "Load older"
+  // prepends a page (the anchor keeps the visible message under the cursor).
+  useEffect(() => {
+    const element = listRef.current;
+    if (element === null) return;
+    const anchor = olderAnchor.current;
+    if (anchor !== null) {
+      olderAnchor.current = null;
+      element.scrollTop =
+        element.scrollHeight - anchor.scrollHeight + anchor.scrollTop;
+      return;
+    }
+    if (!pinToBottom.current) return;
+    pinToBottom.current = false;
+    element.scrollTop = element.scrollHeight;
+  }, [messages]);
+
   // The API returns newest first; a chat reads oldest first.
   const ordered = [...messages].reverse();
+  const dayGroups = groupMessagesByDay(ordered, (sentAt) =>
+    formatDayHeading(sentAt, timeZone, dateFormat),
+  );
   const count = messages.length;
 
   return (
@@ -249,25 +285,30 @@ export function MessagesTab({
             </Alert>
           )}
 
-          <ol aria-label="Messages" className="space-y-4">
-            {ordered.map((message, index) => {
-              const previous = ordered[index - 1];
-              const showDay =
-                previous === undefined ||
-                formatDayHeading(previous.sentAt, timeZone, dateFormat) !==
-                  formatDayHeading(message.sentAt, timeZone, dateFormat);
-              return (
-                <li key={message.id}>
-                  {showDay ? (
-                    <p className="mb-3 text-center text-[11px] font-medium uppercase tracking-wide text-slate-400">
-                      {formatDayHeading(message.sentAt, timeZone, dateFormat)}
-                    </p>
-                  ) : null}
-                  <MessageBubble message={message} timeZone={timeZone} />
-                </li>
-              );
-            })}
-          </ol>
+          <div
+            ref={listRef}
+            role="region"
+            aria-label="Group message history"
+            tabIndex={0}
+            className="max-h-[60vh] overflow-y-auto overscroll-contain rounded-xl border border-slate-200 bg-slate-50/60 p-4 pr-2"
+          >
+            <div className="space-y-4">
+              {dayGroups.map((group) => (
+                <div key={group.heading}>
+                  <p className="sticky top-0 z-10 mb-3 bg-slate-50 py-1.5 text-center text-[11px] font-medium uppercase tracking-wide text-slate-400">
+                    {group.heading}
+                  </p>
+                  <ol className="space-y-4">
+                    {group.messages.map((message) => (
+                      <li key={message.id}>
+                        <MessageBubble message={message} timeZone={timeZone} />
+                      </li>
+                    ))}
+                  </ol>
+                </div>
+              ))}
+            </div>
+          </div>
 
           {nextCursor === null ? null : (
             <div className="flex justify-center">

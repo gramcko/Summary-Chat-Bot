@@ -58,6 +58,12 @@ export interface SummaryQueueLike {
     data: SummaryRunJob,
     opts?: SummaryJobOptions & { jobId?: string },
   ): Promise<unknown>;
+  /**
+   * Drops ALL queue state (waiting/active/retained jobs). Optional so
+   * test doubles only implement it when they exercise purgeAll.
+   * BullMQ's signature: `obliterate(opts?: { force?: boolean })`.
+   */
+  obliterate?(opts?: { force?: boolean }): Promise<void>;
   close(): Promise<void>;
 }
 
@@ -68,6 +74,12 @@ export interface SummaryQueueLike {
  */
 export interface SummaryEnqueuer {
   enqueueSummaryRun(runId: string): Promise<EnqueueOutcome>;
+  /**
+   * Drops every queued/retained summary job (guarded admin "delete all
+   * captured data" action). Optional: test enqueuers may omit it, and
+   * the route treats a failure as non-fatal.
+   */
+  purgeAll?(): Promise<void>;
 }
 
 export type EnqueueLogger = (
@@ -131,6 +143,19 @@ export class RedisSummaryEnqueuer implements SummaryEnqueuer {
       { ...summaryJobOptions(this.retryBaseMs), jobId: runId },
     );
     return "enqueued";
+  }
+
+  async purgeAll(): Promise<void> {
+    // BullMQ 6.5.2: `obliterate(opts?: { force?: boolean })` removes
+    // every job (waiting/active/delayed/retained). `force: true` is
+    // required to purge with an active job — the guarded admin action
+    // runs after the database transaction, so those runs are gone.
+    if (this.queue.obliterate === undefined) {
+      this.log?.("queue_purge_skipped", { reason: "not_supported" });
+      return;
+    }
+    await this.queue.obliterate({ force: true });
+    this.log?.("queue_purged", { scope: "summaries" });
   }
 
   async close(): Promise<void> {

@@ -412,6 +412,49 @@ export function classifyClose(statusCode: number | undefined): {
 }
 
 /**
+ * Connect-time history-sync socket options as a function of the
+ * configured mode and whether the session has successfully OPENED at
+ * least once (persisted `session_established`, migration 0015; ADR 0007).
+ *
+ * Live verification (2026-11): a FRESH registration that requests
+ * `syncFullHistory` together with the Desktop browser preset is closed
+ * by WhatsApp with status 428 "Connection Terminated" BEFORE any QR is
+ * emitted. Probes against a real account showed:
+ *
+ * - full + desktop + syncFullHistory -> 428, no QR
+ * - desktop alone                    -> QR
+ * - syncFullHistory alone            -> QR
+ * - off / recent                     -> QR
+ *
+ * Therefore the Desktop preset and `syncFullHistory` are used only when
+ * the session has opened successfully at least once. `creds.me` is NOT
+ * that signal: Baileys writes it when the QR scan succeeds, but the
+ * next socket is still the registration handshake (closed with 515
+ * restart_required), and the reconnect after it would then apply the
+ * full-history options and be closed with 428 before `open` — no QR,
+ * endless loop, phone reports the link as failed. A fresh registration
+ * always starts with the registration-safe defaults so WhatsApp issues
+ * a QR; `full` applies on a later reconnect/restart, after the first
+ * successful `open`.
+ */
+export interface HistorySyncConfig {
+  /** Use the WhatsApp Desktop browser preset. */
+  desktopBrowser: boolean;
+  /** Ask WhatsApp for the full history payload. */
+  syncFullHistory: boolean;
+}
+
+export function historySyncConfig(
+  mode: HistorySyncMode,
+  sessionEstablished: boolean,
+): HistorySyncConfig {
+  if (!sessionEstablished || mode === "off") {
+    return { desktopBrowser: false, syncFullHistory: false };
+  }
+  return { desktopBrowser: true, syncFullHistory: mode === "full" };
+}
+
+/**
  * Maps one GroupMetadata participants list to roster entries (ADR
  * 0008). WhatsApp group metadata carries only JIDs (verified against
  * the installed 6.7.24 `extractGroupMetadata`), so names normally come
@@ -706,6 +749,15 @@ export class BaileysAdapter implements WhatsAppAdapter {
   private readonly historyCaptureChats = new Set<string>();
   private readonly historySyncMode: HistorySyncMode;
   /**
+   * Persistent "the session has opened at least once" flag (migration
+   * 0015, ADR 0007). Loaded from PostgreSQL by the service before every
+   * connect and set to true after `connection: open`. `creds.me` is NOT
+   * used for the full-history gate: it exists right after the QR scan,
+   * before the first post-scan reconnect that WhatsApp closes with 428
+   * when the Desktop preset + `syncFullHistory` are requested.
+   */
+  private sessionEstablished = false;
+  /**
    * Outstanding request ids (SA-M3): request id -> chat, for
    * log-only correlation of `messaging-history.set` payloads.
    */
@@ -734,6 +786,10 @@ export class BaileysAdapter implements WhatsAppAdapter {
     return () => {
       this.handlers.delete(handler);
     };
+  }
+
+  setSessionEstablished(established: boolean): void {
+    this.sessionEstablished = established;
   }
 
   private emit(event: AdapterEvent): void {
@@ -777,6 +833,26 @@ export class BaileysAdapter implements WhatsAppAdapter {
     if (this.stopping) return;
     this.saveCreds = auth.saveCreds;
 
+    // ADR 0007: a FRESH registration cannot use the Desktop preset or
+    // `syncFullHistory` — WhatsApp closes the socket with 428 before any
+    // QR is emitted. The config decision is pure (historySyncConfig) and
+    // only applies the full-history request to a session that has
+    // successfully OPENED at least once (persisted `session_established`,
+    // migration 0015). `creds.me` must NOT be used here: it exists right
+    // after the QR scan, before the first post-scan reconnect (515
+    // restart_required) that WhatsApp would close with 428.
+    const linked = this.sessionEstablished;
+    const syncConfig = historySyncConfig(this.historySyncMode, linked);
+    // Safe diagnostic: mode/booleans only, never session material. This
+    // line explains a missing QR on a fresh registration; on the first
+    // post-scan reconnect it must show `linked=false`.
+    this.options.log("info", "history_sync_config", {
+      mode: this.historySyncMode,
+      linked,
+      desktopBrowser: syncConfig.desktopBrowser,
+      syncFullHistory: syncConfig.syncFullHistory,
+    });
+
     const version = await this.resolveVersion();
     if (this.stopping) return;
 
@@ -811,11 +887,19 @@ export class BaileysAdapter implements WhatsAppAdapter {
       // complete (WhatsApp's protocol state machine and app-state sync
       // depend on it; the payload is dropped), and `full` additionally
       // captures INITIAL_BOOTSTRAP/RECENT/FULL history for monitored
-      // groups (opt-in backfill, requires a re-link).
-      ...(this.historySyncMode === "off"
-        ? {}
-        : { browser: Browsers.windows("Desktop") }),
-      syncFullHistory: this.historySyncMode === "full",
+      // groups (opt-in backfill).
+      //
+      // The Desktop preset and `syncFullHistory` are only applied to a
+      // session that has OPENED at least once (historySyncConfig +
+      // persisted `session_established`, migration 0015): on a fresh
+      // registration — and on the first reconnect after the QR scan —
+      // they make WhatsApp close the socket with 428 before a QR is
+      // emitted. `full` therefore takes effect on a later reconnect or
+      // worker restart, never during linking (ADR 0007).
+      ...(syncConfig.desktopBrowser
+        ? { browser: Browsers.windows("Desktop") }
+        : {}),
+      syncFullHistory: syncConfig.syncFullHistory,
       shouldSyncHistoryMessage: (historyMsg) => {
         if (
           historyMsg.syncType === proto.HistorySync.HistorySyncType.ON_DEMAND
@@ -1277,6 +1361,14 @@ export class BaileysAdapter implements WhatsAppAdapter {
     } else if (update.connection === "close") {
       const statusCode = disconnectStatusCode(update.lastDisconnect?.error);
       const { retryable, reason } = classifyClose(statusCode);
+      // Safe diagnostic (ADR 0007): the status code is essential — a
+      // 428 "Connection Terminated" (fresh registration with
+      // syncFullHistory) was previously invisible.
+      this.options.log("warn", "connection_close", {
+        statusCode: statusCode ?? null,
+        retryable,
+        reason,
+      });
       this.emit({ type: "close", retryable, reason });
     }
   }

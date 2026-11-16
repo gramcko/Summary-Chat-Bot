@@ -2,6 +2,7 @@
 
 import { DefaultDateFormatForm } from "@/components/settings/DefaultDateFormatForm";
 import { DefaultTimezoneForm } from "@/components/settings/DefaultTimezoneForm";
+import { DeleteAllDataCard } from "@/components/settings/DeleteAllDataCard";
 import { ProviderForm } from "@/components/settings/ProviderForm";
 import { Button } from "@/components/ui/Button";
 import { ErrorState, LoadingBlock, PageHeader } from "@/components/ui/States";
@@ -52,6 +53,8 @@ export default function SettingsPage() {
       <DefaultTimezoneForm />
 
       <DefaultDateFormatForm />
+
+      <DeleteAllDataCard />
 
       <p className="text-xs leading-5 text-slate-500">
         WhatsApp session credentials are never available through the dashboard.

@@ -106,18 +106,32 @@ nothing is restored.
 
 ## Screens
 
-The app shell is a left sidebar (Overview, Groups, Contacts, Summary runs,
-Connection, Settings) with sign-out at the bottom. On desktop it is an
-icon-only rail that expands on hover/focus with an animated overlay; clicking
-a navigation item collapses it immediately, and moving the pointer out resets
-the hover expansion. On small screens it becomes a focus-trapped drawer. A
-skip link, `<nav>`/`<main>` landmarks, visible focus rings, and `aria-live`
-async states are part of the shell. Summary-run status changes and other
-actions raise in-app toast notifications.
+The app shell is a left sidebar (Overview, Assistant, Groups, Contacts,
+Summary runs, Connection, Settings) with sign-out at the bottom. On desktop
+it is an icon-only rail that expands on hover/focus with an animated
+overlay; clicking a navigation item collapses it immediately, and moving
+the pointer out resets the hover expansion. On small screens it becomes a
+focus-trapped drawer. A skip link, `<nav>`/`<main>` landmarks, visible
+focus rings, and `aria-live` async states are part of the shell.
+Summary-run status changes and other actions raise in-app toast
+notifications.
 
 - `/setup` — one-time administrator password + recovery codes (shown once).
 - `/login`, `/recover` — session sign-in and single-use recovery code flow.
 - `/` — connection health, recent summary runs, group shortcuts.
+- `/assistant` — deterministic chat over monitored groups, their captured
+  messages, and summary runs. Supports a summary request for a named group
+  over today/yesterday/last 24 hours/last 7 days, a contact's monitored
+  group membership, and message search by contact (optionally scoped to a
+  group and topic); anything else returns help or a clarification.
+  Citations link to the group, its **Messages** tab, or the run. Tools,
+  citations, and runs come from the backend's deterministic service: an
+  optional Gemini planner may classify the question (sending only the
+  question and monitored group/contact names) and an optional Gemini
+  composer may rewrite the reply text from the deterministic draft
+  (never adding facts or citations). The parser does not resolve
+  follow-ups ("the second one"), and search is capped at 10 hits. The
+  conversation lives only in browser state and is never persisted.
 - `/connection` — live WhatsApp pairing payload (a QR code, or a typed pairing
   code when the bot worker is configured with a phone number), refreshed while
   linking with an expiry countdown, connection details, a **Test session**
@@ -148,7 +162,10 @@ actions raise in-app toast notifications.
   interval).
 - `/settings` — AI provider configuration (the API key is write-only), the
   global **Default time zone** used for new groups and the summary form, and
-  the **Default date format** used for dashboard dates.
+  the **Default date format** used for dashboard dates. At the bottom, a
+  **Danger zone** deletes all captured data (`POST /api/admin/delete-all-data`)
+  after the exact `DELETE ALL` confirmation is typed; admin credentials,
+  settings, the provider key, and the WhatsApp session are kept.
 
 ## Notes
 

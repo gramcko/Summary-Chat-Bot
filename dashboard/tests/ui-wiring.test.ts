@@ -3,9 +3,9 @@ import { readFile } from "node:fs/promises";
 import { test } from "node:test";
 
 /**
- * Wiring tests for two dashboard UX fixes that this runner cannot render —
- * the dashboard has no DOM test environment (no jsdom/testing-library), so
- * these read the sources and assert the parts that regress silently:
+ * Wiring tests for dashboard UX fixes that this runner cannot render — the
+ * dashboard has no DOM test environment (no jsdom/testing-library), so these
+ * read the sources and assert the parts that regress silently:
  *
  * 1. `ConfirmDialog` must be centered. A native `<dialog>` is centered by the
  *    UA stylesheet through `inset: 0` + `margin: auto`, and Tailwind Preflight
@@ -14,6 +14,9 @@ import { test } from "node:test";
  *    navigation drawer, which is intentionally left-aligned.
  * 2. `GroupDetailView` must poll while a history import is in flight, using the
  *    same interval and the same stop condition as the groups list.
+ * 3. `MembersTab` must offer "Refresh members" in both the empty and the
+ *    non-empty state, request a roster sync, and poll the roster afterwards so
+ *    the list updates without a manual page refresh.
  */
 
 const CONFIRM_DIALOG_URL = new URL(
@@ -23,6 +26,10 @@ const CONFIRM_DIALOG_URL = new URL(
 const APP_SHELL_URL = new URL("../src/components/AppShell.tsx", import.meta.url);
 const GROUP_DETAIL_URL = new URL(
   "../src/components/groups/GroupDetailView.tsx",
+  import.meta.url,
+);
+const MEMBERS_TAB_URL = new URL(
+  "../src/components/groups/MembersTab.tsx",
   import.meta.url,
 );
 
@@ -154,5 +161,76 @@ test("GroupDetailView polls the group while a history import is in flight", asyn
     source,
     /<GroupSettingsCard[\s\S]*?group=\{current\}/,
     "the settings card does not receive the refreshed group",
+  );
+});
+
+test("MembersTab requests a roster sync and polls until the roster arrives", async () => {
+  const source = await readFile(MEMBERS_TAB_URL, "utf8");
+
+  // One shared control, rendered by the empty state and by the non-empty
+  // header: the definition plus two usages (`action={...}` and `{...}`).
+  assert.match(
+    source,
+    /const refreshButton = \(\s*<Button[\s\S]*?>\s*Refresh members\s*<\/Button>/,
+    "there is no reusable Refresh members button",
+  );
+  assert.equal(
+    (source.match(/\{refreshButton\}/g) ?? []).length,
+    2,
+    "the refresh control is not rendered in both the empty state and the header",
+  );
+  assert.match(
+    source,
+    /description="[\s\S]*?to ask it for the current roster/,
+    "the empty-state copy does not point at the refresh button",
+  );
+
+  // The click posts to the roster-sync route for this group.
+  assert.match(
+    source,
+    /await api\.requestRosterSync\(groupId\)/,
+    "the button does not request a roster sync",
+  );
+  assert.match(
+    source,
+    /Roster refresh requested\. It can take a few seconds\./,
+    "the request feedback message is missing",
+  );
+
+  // ...and then polls the roster on a bounded window.
+  assert.match(source, /ROSTER_REFRESH_POLL_MS = 2_000/, "poll interval changed");
+  assert.match(
+    source,
+    /ROSTER_REFRESH_WINDOW_MS = 15_000/,
+    "poll window changed",
+  );
+  assert.match(
+    source,
+    /window\.setInterval\(\(\) => \{\s*reload\(\);[\s\S]*?\}, ROSTER_REFRESH_POLL_MS\)/,
+    "the roster is never re-fetched while a refresh is pending",
+  );
+  assert.match(
+    source,
+    /Date\.now\(\) >= deadline[\s\S]*?setPolling\(false\)/,
+    "the poll window never closes",
+  );
+  assert.match(
+    source,
+    /window\.clearInterval\(interval\)/,
+    "the poll interval is never cleared",
+  );
+
+  // Failures are surfaced inline (including the 409/unmonitored case), and the
+  // existing 409 handling of the member list is untouched.
+  assert.match(source, /<Alert tone="error"/, "request failures are silent");
+  assert.match(
+    source,
+    /failure\.code === "conflict"/,
+    "the unmonitored (409) case is not explained",
+  );
+  assert.match(
+    source,
+    /if \(error\.code === "conflict"\)/,
+    "the member-list 409 state was removed",
   );
 });
