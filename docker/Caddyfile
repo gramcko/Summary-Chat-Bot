@@ -1,0 +1,16 @@
+# Summarly Chat Bot — production reverse proxy (docker-compose.yml).
+#
+# Only this service publishes host ports (80/443). It terminates TLS and
+# forwards every request to the dashboard, which proxies /api/* to the
+# backend so the session cookie stays same-origin.
+#
+# DOMAIN is provided by Compose from the .env file. With the default
+# `localhost`, Caddy uses its local CA (browsers warn until that root
+# certificate is trusted — see docs/deployment.md). With a real domain,
+# Caddy obtains a Let's Encrypt certificate automatically (ports 80/443 must
+# be reachable and DNS must point at this host).
+
+{$DOMAIN:localhost} {
+	encode zstd gzip
+	reverse_proxy dashboard:3000
+}

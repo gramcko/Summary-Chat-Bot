@@ -1,0 +1,211 @@
+# Summarly Chat Bot — production single-host deployment.
+#
+#   docker compose up -d --build
+#
+# See docs/deployment.md for prerequisites, first-run steps, backups and
+# upgrades. Only Caddy publishes host ports; PostgreSQL, Redis, the backend
+# and the dashboard stay on the private Compose network.
+#
+# Values come from the repository-root .env (never commit it). Compose sets
+# DATABASE_URL, REDIS_URL and WA_SESSION_DIR for the containers, so the
+# development values in .env do not leak into this stack.
+
+name: summarly
+
+# Shared by every Node.js service (backend, workers, migration one-shot).
+x-app-base: &app-base
+  image: ${SUMMARLY_APP_IMAGE:-summarly-app:local}
+  env_file:
+    - .env
+  restart: unless-stopped
+  init: true
+  stop_grace_period: 30s
+  logging:
+    driver: json-file
+    options:
+      max-size: "10m"
+      max-file: "3"
+
+# Container-internal service addresses (they override the .env values).
+x-app-env: &app-env
+  NODE_ENV: production
+  DATABASE_URL: postgres://${POSTGRES_USER:-summarly}:${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}@postgres:5432/${POSTGRES_DB:-summarly}
+  REDIS_URL: redis://redis:6379
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    init: true
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-summarly}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}
+      POSTGRES_DB: ${POSTGRES_DB:-summarly}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+    stop_grace_period: 1m
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  # Redis carries BullMQ queue state only; PostgreSQL stays the source of
+  # truth for messages, runs and summaries (docs/architecture.md 4.6).
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    init: true
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 5s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  # One-shot schema migration. Runs before every other application service;
+  # the others wait for it to exit successfully. Idempotent, so re-running it
+  # on `docker compose up` is safe.
+  migrate:
+    <<: *app-base
+    command: ["npx", "tsx", "scripts/migrate.ts", "up"]
+    working_dir: /app/backend
+    restart: "no"
+    environment:
+      <<: *app-env
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  backend:
+    <<: *app-base
+    build:
+      context: .
+      dockerfile: docker/app.Dockerfile
+    environment:
+      <<: *app-env
+      HOST: 0.0.0.0
+      PORT: "3000"
+      # Compose runs the workers as their own services.
+      SUPERVISE_WORKERS: "false"
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test:
+        - CMD
+        - node
+        - -e
+        - "fetch('http://127.0.0.1:3000/health',{signal:AbortSignal.timeout(3000)}).then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+  summary-worker:
+    <<: *app-base
+    command: ["node", "summary-worker/dist/index.js"]
+    environment:
+      <<: *app-env
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+
+  bot-worker:
+    <<: *app-base
+    command: ["node", "bot-worker/dist/index.js"]
+    environment:
+      <<: *app-env
+      # Protected volume outside the repository tree; 0700, owned by node.
+      WA_SESSION_DIR: /data/wa-session
+      # No terminal in a container: the QR/pairing payload is published to
+      # PostgreSQL and shown on the dashboard's Connection page (ADR 0008).
+      WA_LINKING_DISPLAY: "none"
+    volumes:
+      - wa-session:/data/wa-session
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+
+  dashboard:
+    image: ${SUMMARLY_DASHBOARD_IMAGE:-summarly-dashboard:local}
+    build:
+      context: .
+      dockerfile: docker/dashboard.Dockerfile
+      args:
+        # Baked into the Next.js routes manifest at build time.
+        BACKEND_URL: http://backend:3000
+    restart: unless-stopped
+    init: true
+    environment:
+      NODE_ENV: production
+      PORT: "3000"
+      BACKEND_URL: http://backend:3000
+    depends_on:
+      backend:
+        condition: service_healthy
+    healthcheck:
+      test:
+        - CMD
+        - node
+        - -e
+        - "fetch('http://127.0.0.1:3000/login',{signal:AbortSignal.timeout(3000)}).then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    init: true
+    environment:
+      DOMAIN: ${DOMAIN:-localhost}
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    volumes:
+      - ./docker/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    depends_on:
+      dashboard:
+        condition: service_healthy
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+volumes:
+  postgres-data:
+  redis-data:
+  # WhatsApp (Baileys) session credentials. Sensitive: it can link the
+  # account. Back it up only with the same care as the ENCRYPTION_KEY.
+  wa-session:
+  caddy-data:
+  caddy-config:

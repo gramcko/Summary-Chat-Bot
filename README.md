@@ -101,6 +101,10 @@ the session directory lives inside the repository), also set:
 WA_SESSION_ALLOW_INSECURE=yes
 ```
 
+`.env.example` ships `COOKIE_SECURE=true` because the production stack serves
+HTTPS. If your browser refuses the session cookie over plain HTTP during
+development, set `COOKIE_SECURE=false`.
+
 Apply migrations:
 
 ```bash
@@ -136,6 +140,43 @@ WhatsApp on the **Connection** page (QR or pairing code).
 6. Use **Contacts** to see who participates in monitored groups and their
    cross-group messages.
 
+## Docker deployment
+
+The production stack (PostgreSQL, Redis, migrations, backend, both workers,
+dashboard, and Caddy for TLS) runs on a single host:
+
+```bash
+npm run setup -- --domain summarly.example.com   # generates .env, builds and starts
+```
+
+The setup script writes `.env` with a generated PostgreSQL password and
+`ENCRYPTION_KEY` (generated locally, never printed) and runs
+`docker compose up -d --build --wait`. Use `--domain localhost` for a local
+install, `--no-start` to only create `.env`, and `--force` to overwrite an
+existing `.env`. Manual equivalent:
+
+```bash
+cp .env.example .env    # set DOMAIN, POSTGRES_PASSWORD, ENCRYPTION_KEY
+docker compose up -d --build --wait
+```
+
+Only Caddy publishes ports (80/443); PostgreSQL and Redis stay private. The
+`migrate` service applies schema migrations before the application services
+start. See **[docs/deployment.md](docs/deployment.md)** for prerequisites, DNS
+and firewall, first-run `/setup`, WhatsApp linking, volumes, backups/restore,
+upgrades and recovery.
+
+Back up and restore the running stack with:
+
+```bash
+npm run backup -- --include-env --keep 14    # DB dump + WhatsApp session
+npm run restore -- backups/<timestamp>       # restore, then restart the stack
+```
+
+Backups contain chat data and WhatsApp session credentials; encrypt them and
+back up `ENCRYPTION_KEY` separately. See
+[docs/deployment.md](docs/deployment.md#backups-and-restore).
+
 ## Configuration
 
 All variables live in the repository-root `.env` (ignored by Git). See
@@ -155,6 +196,8 @@ All variables live in the repository-root `.env` (ignored by Git). See
 | `WA_HISTORY_SYNC` | `off` (default), `recent`, or `full` connect-time history policy |
 | `DEFAULT_GROUP_TIMEZONE` | Fallback IANA zone for new groups |
 | `SCHEDULER_ENABLED`, `SCHEDULER_INTERVAL_MS`, `DEFAULT_SUMMARY_TIME` | Daily scheduler |
+| `MESSAGE_RETENTION_DAYS` | Delete captured messages older than N days (`0`/unset keeps forever; messages only) |
+| `RETENTION_INTERVAL_MS` | Retention pass cadence (default one day; floor `60000`) |
 | `HISTORY_IMPORT_*` | Bounded history-import budgets |
 
 The **AI provider**, the **default time zone**, and the **default date format**
@@ -179,6 +222,9 @@ on `messages.body`; migration 0013). The database role must be allowed to
 From the repository root:
 
 ```bash
+npm run setup       # production Docker setup: generate .env + start the stack
+npm run backup      # production backup: PostgreSQL dump + WhatsApp session
+npm run restore     # restore a backup directory (see docs/deployment.md)
 npm run build       # build contracts, backend, workers, dashboard
 npm run typecheck   # type-check every workspace
 npm test            # unit tests for every workspace
@@ -223,6 +269,13 @@ scripts/          Provider smoke test and e2e harness
 - Chat messages, member names, phone JIDs, and summaries are PII. They are
   served only on the authenticated admin API, are never logged by default, and
   are covered by the retention/purge rules.
+- **Automatic message retention.** `MESSAGE_RETENTION_DAYS` deletes captured
+  messages older than N days on a periodic backend pass
+  (`RETENTION_INTERVAL_MS`, default one day); `0`/unset keeps them forever.
+  Only messages are deleted — summaries, summary runs, groups, rosters, and
+  settings are kept, so a summary's source-message references may point at
+  messages that no longer exist. Backups taken earlier still contain the
+  deleted messages.
 - Saved AI provider API keys are encrypted at rest with AES-256-GCM; the
   browser only ever sees whether a key is saved.
 - PostgreSQL and Redis are private to the Compose network/loopback in dev.

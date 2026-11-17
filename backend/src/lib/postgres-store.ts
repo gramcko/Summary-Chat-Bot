@@ -819,6 +819,19 @@ export class PostgresStore implements Store {
     return dateFormat;
   }
 
+  // ---- Retention ----
+
+  async deleteMessagesBefore(before: Date): Promise<number> {
+    // Parameterized and scoped to `messages` ONLY: summaries, runs,
+    // groups, rosters, and settings are deliberately kept (AGENTS.md
+    // data integrity — retention applies to captured chat content).
+    const result = await this.pool.query(
+      "DELETE FROM messages WHERE sent_at < $1",
+      [before],
+    );
+    return result.rowCount ?? 0;
+  }
+
   // ---- Guarded data deletion (danger zone) ----
 
   async deleteAllData(): Promise<DeleteAllDataCounts> {

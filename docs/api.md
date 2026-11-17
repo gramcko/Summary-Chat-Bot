@@ -516,10 +516,19 @@ Database backups taken before the deletion still contain the data.
 
 ## Data retention
 
-- Captured messages (`messages`) are **retained until deleted**. There is
-  **no automatic expiry in the MVP**; the retention policy has not been
-  productized yet (tracked for Phase E/F — see `docs/decisions/0004` §11).
-- The explicit deletion paths today are:
+- Captured messages (`messages`) are retained until deleted. Automatic
+  retention is **configurable** via the backend environment:
+  `MESSAGE_RETENTION_DAYS=N` deletes messages whose `sent_at` is older
+  than N days, and `RETENTION_INTERVAL_MS` (default one day, floor
+  60000) sets the cadence of the pass. `0`/unset (the default) keeps
+  messages **forever**.
+- Retention applies to **messages only**: summary runs, completed
+  summaries, groups, the member roster, contact overrides, and settings
+  are kept. A summary's `sourceRefs` therefore may point at messages
+  deleted by a retention pass (the references dangle; the summary
+  itself is never rewritten). Database backups taken before a pass
+  still contain the deleted messages.
+- The explicit deletion paths are:
   - the operator CLI `npm run purge-messages -w @summarly/backend` (by
     group id, chat id, and/or a `--before <ISO date>` cutoff;
     destructive, with a typed confirmation or an explicit `--yes` flag;
@@ -548,5 +557,6 @@ Database backups taken before the deletion still contain the data.
   and the bot-worker's sync require a monitored group, and migration
   0006 removes rows captured before the gate), `purge-messages` covers
   it (see above), and it otherwise follows the same retention policy —
-  it should be included in any future automated retention pass
-  (tracked with retention productization, `docs/decisions/0004` §11).
+  note that `MESSAGE_RETENTION_DAYS` covers messages only; roster rows
+  are removed by `purge-messages` or `delete-all-data` (automatic
+  roster retention remains tracked with `docs/decisions/0004` §11).

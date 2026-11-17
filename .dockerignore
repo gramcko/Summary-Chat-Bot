@@ -1,0 +1,50 @@
+# Build context hygiene for the production images (docker/app.Dockerfile,
+# docker/dashboard.Dockerfile). Keep this list in sync when a new large or
+# sensitive directory appears at the repository root.
+
+# Version control and agent/tooling metadata
+.git
+.gitignore
+.agents
+.opencode
+opencode.json
+.vscode
+.idea
+
+# Dependencies and build output — always rebuilt inside the image
+**/node_modules
+**/dist
+**/.next
+**/out
+**/*.tsbuildinfo
+coverage
+
+# Local configuration and secrets — never baked into an image
+.env
+.env.*
+**/.env
+**/.env.*
+!**/.env.example
+
+# WhatsApp (Baileys) session state: credential material, never in an image
+wa-session
+**/wa-session
+*.creds.json
+
+# Logs, backups, database dumps, scratch files
+logs
+backups
+tmp
+*.log
+*.backup
+*.dump
+
+# Tests, docs and agent notes are not needed to build or run the app
+**/tests
+docs
+**/*.md
+LICENSE
+
+# OS noise
+.DS_Store
+Thumbs.db

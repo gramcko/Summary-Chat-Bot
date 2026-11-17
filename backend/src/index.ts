@@ -10,6 +10,11 @@ import { loadRepoEnv } from "./lib/load-env.js";
 import { PostgresStore } from "./lib/postgres-store.js";
 import { parseReconcileIntervalMs, Reconciler } from "./lib/reconcile.js";
 import {
+  parseRetentionDays,
+  parseRetentionIntervalMs,
+  RetentionService,
+} from "./lib/retention.js";
+import {
   parseSchedulerEnabled,
   parseSchedulerIntervalMs,
   parseBackfillDays,
@@ -114,6 +119,8 @@ let schedulerIntervalMs: number;
 let defaultSummaryTime: number;
 let backfillDays: number;
 let superviseWorkers: boolean;
+let retentionDays: number;
+let retentionIntervalMs: number;
 try {
   retryBaseMs = parseRetryBaseMs(process.env["SUMMARY_RETRY_BASE_MS"]);
   queuePrefix = parseQueuePrefix(process.env["SUMMARY_QUEUE_PREFIX"]);
@@ -127,6 +134,10 @@ try {
   defaultSummaryTime = parseSummaryTime(process.env["DEFAULT_SUMMARY_TIME"]);
   backfillDays = parseBackfillDays(process.env["BACKFILL_DAYS"]);
   superviseWorkers = parseSuperviseWorkers(process.env["SUPERVISE_WORKERS"]);
+  retentionDays = parseRetentionDays(process.env["MESSAGE_RETENTION_DAYS"]);
+  retentionIntervalMs = parseRetentionIntervalMs(
+    process.env["RETENTION_INTERVAL_MS"],
+  );
 } catch (error) {
   fail(error instanceof Error ? error.message : "Invalid configuration.");
 }
@@ -160,6 +171,21 @@ const scheduler = new Scheduler({
   log,
 });
 
+// Automatic message retention (MESSAGE_RETENTION_DAYS): deletes captured
+// messages older than N days on a periodic pass. 0 (the default) keeps
+// them forever, so the service is not even constructed. Messages only —
+// summaries, runs, and settings are kept. Only the real backend index
+// wires it: the in-memory/test store must never start a deletion timer.
+const retention =
+  retentionDays > 0
+    ? new RetentionService({
+        store,
+        retentionDays,
+        intervalMs: retentionIntervalMs,
+        log,
+      })
+    : undefined;
+
 const app = await buildApp({
   store,
   enqueue: enqueuer,
@@ -177,6 +203,8 @@ reconciler.start();
 if (schedulerEnabled) {
   scheduler.start();
 }
+// Retention also passes once at startup and then on its own interval.
+retention?.start();
 // Worker supervision (docs/decisions/0008, round 3): spawn and
 // supervise summary-worker + bot-worker so `npm run dev -w
 // @summarly/backend` + the dashboard is all that is needed. The e2e
@@ -200,6 +228,8 @@ log("backend_started", {
   ),
   retryBaseMs,
   queuePrefix,
+  retentionDays,
+  retentionIntervalMs,
 });
 
 let shuttingDown = false;
@@ -221,6 +251,10 @@ for (const signal of shutdownSignals) {
         await supervisor?.stop();
         await scheduler.stop();
         await reconciler.stop();
+        // Retention stops after the other timers and before the pool:
+        // its in-flight DELETE finishes (or is awaited) while the
+        // database connection is still open.
+        await retention?.stop();
         await app.close();
         await enqueuer.close();
         await pool.end();

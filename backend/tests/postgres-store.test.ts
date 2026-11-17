@@ -1976,5 +1976,67 @@ describe.skipIf(!process.env["DATABASE_URL"])(
         expect(connectionCount.rows[0]?.n).toBe(1);
       });
     });
+
+    describe("deleteMessagesBefore (automatic retention)", () => {
+      it("deletes only messages strictly older than the cutoff", async () => {
+        const store = new PostgresStore(pool);
+        const groupId = await seedGroupRow(store);
+        const { run } = await store.createOrFindRun({
+          groupId,
+          interval: INTERVAL,
+          kind: "manual",
+        });
+        await store.saveSummary({
+          id: randomUUID(),
+          runId: run.id,
+          provider: "mock",
+          model: "mock-1",
+          result: RESULT,
+          createdAt: "2026-11-02T00:00:00Z",
+        });
+
+        const connectionId = randomUUID();
+        await pool.query(
+          "INSERT INTO whatsapp_connections (id, state) VALUES ($1, 'connected')",
+          [connectionId],
+        );
+        const insertMessage = async (sentAt: string) => {
+          await pool.query(
+            `INSERT INTO messages
+               (connection_id, chat_id, whatsapp_message_id, sender_id,
+                sender_name, sent_at, body)
+             VALUES ($1, '120363000000000001@g.us', $2, '111@s.whatsapp.net',
+                     NULL, $3, 'hello')`,
+            [connectionId, `wa-${randomUUID()}`, new Date(sentAt)],
+          );
+        };
+        await insertMessage("2026-11-01T10:00:00Z"); // older
+        await insertMessage("2026-11-02T00:00:00Z"); // exactly at the cutoff
+        await insertMessage("2026-11-03T10:00:00Z"); // newer
+
+        const deleted = await store.deleteMessagesBefore(
+          new Date("2026-11-02T00:00:00Z"),
+        );
+        expect(deleted).toBe(1);
+
+        const remaining = await pool.query<{ sent_at: Date }>(
+          "SELECT sent_at FROM messages ORDER BY sent_at",
+        );
+        expect(remaining.rows.map((row) => row.sent_at.toISOString())).toEqual([
+          "2026-11-02T00:00:00.000Z",
+          "2026-11-03T10:00:00.000Z",
+        ]);
+
+        // Messages only: the run and its summary survive the pass, so a
+        // summary's source refs may dangle but the summary is kept.
+        expect(await store.getRun(run.id)).toBeDefined();
+        expect(await store.getSummaryByRunId(run.id)).toBeDefined();
+
+        // An earlier cutoff matches nothing and reports 0.
+        expect(
+          await store.deleteMessagesBefore(new Date("2020-01-01T00:00:00Z")),
+        ).toBe(0);
+      });
+    });
   },
 );

@@ -406,6 +406,16 @@ export interface Store {
   getDefaultDateFormat(): Promise<DateFormat>;
   setDefaultDateFormat(dateFormat: DateFormat): Promise<DateFormat>;
 
+  // ---- Retention ----
+  /**
+   * Deletes captured messages whose `sent_at` is strictly before the
+   * cutoff (half-open retention: a message at exactly `before` is kept).
+   * Returns the number of rows removed. Messages ONLY: summaries, runs,
+   * groups, rosters, and settings are untouched — a summary's
+   * source-message references may therefore dangle after a pass.
+   */
+  deleteMessagesBefore(before: Date): Promise<number>;
+
   // ---- Guarded data deletion (danger zone) ----
   /**
    * Deletes ALL captured data in one transaction: summaries,
@@ -1167,6 +1177,19 @@ export class InMemoryStore implements Store {
   async setDefaultDateFormat(dateFormat: DateFormat): Promise<DateFormat> {
     this.defaultDateFormat = dateFormat;
     return dateFormat;
+  }
+
+  async deleteMessagesBefore(before: Date): Promise<number> {
+    // Strictly-before semantics, like the SQL `sent_at < $1`: a message
+    // sent exactly at the cutoff survives the pass.
+    const cutoff = before.getTime();
+    const kept = this.messageLog.filter(
+      (message) => Date.parse(message.sentAt) >= cutoff,
+    );
+    const deleted = this.messageLog.length - kept.length;
+    this.messageLog.length = 0;
+    for (const message of kept) this.messageLog.push(message);
+    return deleted;
   }
 
   async deleteAllData(): Promise<DeleteAllDataCounts> {
