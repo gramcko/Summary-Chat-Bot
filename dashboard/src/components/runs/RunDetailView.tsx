@@ -2,6 +2,7 @@
 
 import type { RunStatus } from "@summarly/contracts";
 import Link from "next/link";
+import { useSearchParams } from "next/navigation";
 import { useEffect, useState, type ReactNode } from "react";
 import { SummaryView } from "@/components/SummaryView";
 import { RunMessagesTab } from "@/components/runs/RunMessagesTab";
@@ -46,7 +47,13 @@ const RUN_TABS: readonly TabDefinition[] = [
 ];
 
 export function RunDetailView({ runId }: { runId: string }) {
-  const [tab, setTab] = useState<string>("summary");
+  const searchParams = useSearchParams();
+  // `?tab=messages&message=<id>` is the shape used by summary source links.
+  const requestedTab = searchParams.get("tab");
+  const focusMessageId = searchParams.get("message");
+  const [tab, setTab] = useState<string>(
+    requestedTab === "messages" ? "messages" : "summary",
+  );
   const timeZone = useAppTimeZone();
   const dateFormat = useAppDateFormat();
   const run = useResource(() => api.run(runId), [runId]);
@@ -72,6 +79,16 @@ export function RunDetailView({ runId }: { runId: string }) {
 
   const polling = isRunInProgress(current);
   const reloadRun = run.reload;
+
+  // A source link always carries `tab=messages` plus the cited `message`.
+  // Reacting to the params (not just the first render) means clicking a link
+  // while already on this run page switches tabs and re-focuses the message,
+  // even if the reader had moved to the Summary tab since the URL was set.
+  useEffect(() => {
+    if (requestedTab === "messages" || focusMessageId !== null) {
+      setTab("messages");
+    }
+  }, [requestedTab, focusMessageId]);
 
   useEffect(() => {
     if (!polling) return;
@@ -270,6 +287,7 @@ export function RunDetailView({ runId }: { runId: string }) {
                 summary={summary.data}
                 timeZone={current.interval.timezone}
                 dateFormat={dateFormat}
+                runId={runId}
               />
             )}
           </div>
@@ -278,6 +296,7 @@ export function RunDetailView({ runId }: { runId: string }) {
           <RunMessagesTab
             groupId={current.groupId}
             interval={current.interval}
+            focusMessageId={focusMessageId}
           />
         ) : null}
       </Tabs>

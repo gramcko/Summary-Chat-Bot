@@ -15,6 +15,13 @@ import { instantToWallTimeInZone, wallTimeInZoneToInstant } from "./time.ts";
 export const MESSAGE_PAGE_SIZE = 50;
 export const DEFAULT_RANGE_DAYS = 7;
 
+/**
+ * Bound for the automatic page walk that locates a cited source message. A run
+ * whose cited message sits deeper than this is reported as "not among the
+ * loaded source messages" instead of walking the whole history.
+ */
+export const MAX_FOCUS_PAGE_FETCHES = 40;
+
 const DAY_MS = 24 * 60 * 60 * 1000;
 
 export interface MessageRangeInput {
@@ -101,6 +108,55 @@ export function mergeOlderMessages<T extends { id: string }>(
     merged.push(message);
   }
   return merged;
+}
+
+export interface MessagePageLike<T> {
+  /** Newest first, like the API page. */
+  items: T[];
+  /** Cursor for the next older page, or `null` when exhausted. */
+  nextCursor: string | null;
+}
+
+export interface MessageLookupResult<T> {
+  /** True when the message is in the first page or one of the fetched pages. */
+  found: boolean;
+  /** Older pages fetched while looking, in fetch order (newest first). */
+  pages: MessagePageLike<T>[];
+  /** Cursor for the next older page after the last fetched one. */
+  nextCursor: string | null;
+}
+
+/**
+ * Walks older pages until `messageId` appears, or `maxPages` fetches / the end
+ * of the history is reached. Used by the run view to reveal a cited source
+ * message that is not on the first page. The walk is bounded so a stale or
+ * foreign message id cannot page through the whole chat history.
+ */
+export async function findMessageInOlderPages<T extends { id: string }>(
+  firstPage: MessagePageLike<T>,
+  messageId: string,
+  fetchOlder: (cursor: string) => Promise<MessagePageLike<T>>,
+  maxPages: number = MAX_FOCUS_PAGE_FETCHES,
+): Promise<MessageLookupResult<T>> {
+  if (firstPage.items.some((item) => item.id === messageId)) {
+    return { found: true, pages: [], nextCursor: firstPage.nextCursor };
+  }
+
+  const pages: MessagePageLike<T>[] = [];
+  let cursor = firstPage.nextCursor;
+  let found = false;
+
+  while (cursor !== null && pages.length < maxPages) {
+    const page = await fetchOlder(cursor);
+    pages.push(page);
+    cursor = page.nextCursor;
+    if (page.items.some((item) => item.id === messageId)) {
+      found = true;
+      break;
+    }
+  }
+
+  return { found, pages, nextCursor: cursor };
 }
 
 export interface MessageDayGroup<T> {

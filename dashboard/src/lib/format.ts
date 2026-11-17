@@ -13,6 +13,16 @@ export function shortId(id: string): string {
   return id.length > 12 ? `${id.slice(0, 8)}…` : id;
 }
 
+/**
+ * Link to one source message inside a run's "Messages used" tab. The run page
+ * reads `tab`/`message` from the URL, selects the Messages tab, and scrolls the
+ * cited message into view.
+ */
+export function sourceMessageHref(runId: string, messageId: string): string {
+  const params = new URLSearchParams({ tab: "messages", message: messageId });
+  return `/runs/${encodeURIComponent(runId)}?${params.toString()}`;
+}
+
 export function pluralize(
   count: number,
   singular: string,

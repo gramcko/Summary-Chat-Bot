@@ -2,7 +2,9 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import type { ApiMessage } from "@summarly/contracts";
 import {
+  MAX_FOCUS_PAGE_FETCHES,
   defaultMessageRange,
+  findMessageInOlderPages,
   groupMessagesByDay,
   mergeOlderMessages,
   resolveMessageRange,
@@ -156,5 +158,103 @@ test("sender label prefers the push name", () => {
   assert.equal(
     senderLabel({ ...message("a", "2026-11-03T10:00:00.000Z"), senderName: null }),
     "sender-1",
+  );
+});
+
+test("finding a cited message stops at the first page when it is there", async () => {
+  let fetches = 0;
+  const result = await findMessageInOlderPages(
+    { items: [message("a", "2026-11-03T10:00:00.000Z")], nextCursor: "c1" },
+    "a",
+    async () => {
+      fetches += 1;
+      return { items: [], nextCursor: null };
+    },
+  );
+
+  assert.equal(result.found, true);
+  assert.deepEqual(result.pages, []);
+  assert.equal(result.nextCursor, "c1");
+  assert.equal(fetches, 0, "the first page must not trigger an extra fetch");
+});
+
+test("finding a cited message walks older pages and keeps the next cursor", async () => {
+  const pages: Record<string, { items: ApiMessage[]; nextCursor: string | null }> = {
+    c1: { items: [message("b", "2026-11-02T10:00:00.000Z")], nextCursor: "c2" },
+    c2: {
+      items: [
+        message("c", "2026-11-01T10:00:00.000Z"),
+        message("d", "2026-10-31T10:00:00.000Z"),
+      ],
+      nextCursor: "c3",
+    },
+  };
+  const visited: string[] = [];
+
+  const result = await findMessageInOlderPages(
+    { items: [message("a", "2026-11-03T10:00:00.000Z")], nextCursor: "c1" },
+    "c",
+    async (cursor) => {
+      visited.push(cursor);
+      return pages[cursor] ?? { items: [], nextCursor: null };
+    },
+  );
+
+  assert.equal(result.found, true);
+  assert.deepEqual(visited, ["c1", "c2"]);
+  assert.deepEqual(
+    result.pages.map((page) => page.items.map((entry) => entry.id)),
+    [["b"], ["c", "d"]],
+  );
+  assert.equal(result.nextCursor, "c3");
+});
+
+test("finding a cited message stops at the end of the history", async () => {
+  let fetches = 0;
+  const result = await findMessageInOlderPages(
+    { items: [message("a", "2026-11-03T10:00:00.000Z")], nextCursor: "c1" },
+    "missing",
+    async () => {
+      fetches += 1;
+      return { items: [message("b", "2026-11-02T10:00:00.000Z")], nextCursor: null };
+    },
+  );
+
+  assert.equal(result.found, false);
+  assert.equal(fetches, 1);
+  assert.equal(result.nextCursor, null);
+});
+
+test("finding a cited message never fetches more than the bound", async () => {
+  let fetches = 0;
+  const result = await findMessageInOlderPages(
+    { items: [message("a", "2026-11-03T10:00:00.000Z")], nextCursor: "c1" },
+    "missing",
+    async (cursor) => {
+      fetches += 1;
+      return {
+        items: [message(`older-${cursor}`, "2026-11-02T10:00:00.000Z")],
+        nextCursor: `next-${cursor}`,
+      };
+    },
+    3,
+  );
+
+  assert.equal(result.found, false);
+  assert.equal(fetches, 3);
+  assert.equal(result.nextCursor, "next-next-next-c1");
+  assert.ok(MAX_FOCUS_PAGE_FETCHES >= 40, "the default bound must stay bounded");
+});
+
+test("finding a cited message propagates fetch failures", async () => {
+  await assert.rejects(
+    findMessageInOlderPages(
+      { items: [], nextCursor: "c1" },
+      "missing",
+      async () => {
+        throw new Error("network down");
+      },
+    ),
+    /network down/,
   );
 });

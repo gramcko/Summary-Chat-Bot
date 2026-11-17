@@ -111,6 +111,10 @@ Developer API", updated 2026-09-14):
   rendering the cited message text for one-click verification is a
   tracked follow-up (audit E-7) — until then the UI's "verify against
   sources" notice should not be over-read as clickable citations.
+  Since 2026-11-16 the dashboard links every ref to the cited row in the
+  run's "Messages used" tab (`/runs/<runId>?tab=messages&message=<id>`),
+  so verification is one click even though the summary payload still
+  carries ids and timestamps only.
 
 #### Irreducible residual risk (audit E-1, recorded deliberately)
 

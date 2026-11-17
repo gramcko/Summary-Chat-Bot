@@ -10,23 +10,35 @@ import { EmptyState, ErrorState } from "@/components/ui/States";
 import { SkeletonRows } from "@/components/ui/Skeleton";
 import { api, toApiError, type ApiError } from "@/lib/api";
 import {
+  MAX_FOCUS_PAGE_FETCHES,
   MESSAGE_PAGE_SIZE,
+  findMessageInOlderPages,
   groupMessagesByDay,
   mergeOlderMessages,
 } from "@/lib/group-messages";
 import { formatDayHeading, formatInterval } from "@/lib/time";
 
+/** How long a revealed source message stays highlighted. */
+const FOCUS_HIGHLIGHT_MS = 4_000;
+
 /**
  * Messages in the run's half-open interval — the source set the
  * summary-worker read for this run. Rendered oldest first (newest at the
  * bottom), with "load older".
+ *
+ * `focusMessageId` (from a summary source link) reveals one cited message: it
+ * walks older pages until the message is loaded, scrolls it into view inside
+ * the list, and highlights it briefly.
  */
 export function RunMessagesTab({
   groupId,
   interval,
+  focusMessageId = null,
 }: {
   groupId: string;
   interval: Interval;
+  /** Cited message to reveal (the run page's `?message=` param). */
+  focusMessageId?: string | null;
 }) {
   const dateFormat = useAppDateFormat();
   const [messages, setMessages] = useState<ApiMessage[]>([]);
@@ -35,8 +47,19 @@ export function RunMessagesTab({
   const [loadingOlder, setLoadingOlder] = useState(false);
   const [error, setError] = useState<ApiError | null>(null);
   const [olderError, setOlderError] = useState<ApiError | null>(null);
+  // Bumped after every successful first-page load, so the focus effect below
+  // knows when `messages`/`nextCursor` are in sync with the current interval.
+  const [pageVersion, setPageVersion] = useState(0);
+  const [focusMissingId, setFocusMissingId] = useState<string | null>(null);
+  const [focusError, setFocusError] = useState<ApiError | null>(null);
+  const [focusLoading, setFocusLoading] = useState(false);
+  const [pendingRevealId, setPendingRevealId] = useState<string | null>(null);
+  const [highlightedId, setHighlightedId] = useState<string | null>(null);
   const requestId = useRef(0);
+  const focusRequestId = useRef(0);
   const listRef = useRef<HTMLDivElement | null>(null);
+  const messageRefs = useRef(new Map<string, HTMLLIElement>());
+  const highlightTimer = useRef<number | null>(null);
   // After a first page renders, pin the view to the newest (bottom) message.
   const pinToBottom = useRef(true);
   // Scroll metrics captured before "Load older" prepends a page.
@@ -61,6 +84,7 @@ export function RunMessagesTab({
       if (requestId.current !== id) return;
       setMessages(page.items);
       setNextCursor(page.nextCursor);
+      setPageVersion((version) => version + 1);
     } catch (cause) {
       if (requestId.current !== id) return;
       setError(toApiError(cause));
@@ -121,6 +145,142 @@ export function RunMessagesTab({
     element.scrollTop = element.scrollHeight;
   }, [messages]);
 
+  // Reveal a cited source message. The first page has already been applied when
+  // `pageVersion` changes, so `messages`/`nextCursor` are current here. If the
+  // message is not loaded, walk older pages (bounded) until it is found or the
+  // history/bound ends. A request id cancels the walk when the target or page
+  // changes, and on unmount.
+  useEffect(() => {
+    const target = focusMessageId ?? null;
+    if (target === null) {
+      focusRequestId.current += 1;
+      setFocusMissingId(null);
+      setFocusError(null);
+      setFocusLoading(false);
+      setPendingRevealId(null);
+      return;
+    }
+    if (loading || error !== null) return;
+
+    if (messages.some((message) => message.id === target)) {
+      focusRequestId.current += 1;
+      setFocusMissingId(null);
+      setFocusError(null);
+      setFocusLoading(false);
+      setPendingRevealId(target);
+      return;
+    }
+
+    if (nextCursor === null) {
+      setFocusMissingId(target);
+      setFocusError(null);
+      setFocusLoading(false);
+      return;
+    }
+
+    const request = focusRequestId.current + 1;
+    focusRequestId.current = request;
+    setFocusMissingId(null);
+    setFocusError(null);
+    setFocusLoading(true);
+
+    void (async () => {
+      try {
+        const result = await findMessageInOlderPages(
+          { items: messages, nextCursor },
+          target,
+          (cursor) =>
+            api.groupMessages(groupId, {
+              from: interval.start,
+              to: interval.end,
+              cursor,
+              limit: MESSAGE_PAGE_SIZE,
+            }),
+          MAX_FOCUS_PAGE_FETCHES,
+        );
+        if (focusRequestId.current !== request) return;
+        if (result.pages.length > 0) {
+          setMessages((current) =>
+            result.pages.reduce(
+              (accumulated, page) => mergeOlderMessages(accumulated, page.items),
+              current,
+            ),
+          );
+          setNextCursor(result.nextCursor);
+        }
+        if (result.found) {
+          setPendingRevealId(target);
+        } else {
+          setFocusMissingId(target);
+        }
+      } catch (cause) {
+        if (focusRequestId.current !== request) return;
+        setFocusError(toApiError(cause));
+      } finally {
+        if (focusRequestId.current === request) setFocusLoading(false);
+      }
+    })();
+
+    return () => {
+      focusRequestId.current += 1;
+    };
+    // `messages`/`nextCursor` are deliberately omitted: the walk starts once per
+    // first page (`pageVersion`) or focus target, never on its own page merges.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [
+    focusMessageId,
+    pageVersion,
+    groupId,
+    interval.start,
+    interval.end,
+    loading,
+    error,
+  ]);
+
+  // Scroll the revealed message to the middle of the list and highlight it.
+  // Runs after the message list has rendered the target.
+  useEffect(() => {
+    if (pendingRevealId === null) return;
+    if (!messages.some((message) => message.id === pendingRevealId)) return;
+
+    const element = messageRefs.current.get(pendingRevealId);
+    const container = listRef.current;
+    if (element !== undefined && container !== null) {
+      // Measure against the scroll container's viewport, not `offsetTop`
+      // (which is relative to the nearest positioned ancestor).
+      const elementRect = element.getBoundingClientRect();
+      const containerRect = container.getBoundingClientRect();
+      container.scrollTop = Math.max(
+        0,
+        container.scrollTop +
+          elementRect.top -
+          containerRect.top -
+          container.clientHeight / 2 +
+          elementRect.height / 2,
+      );
+    }
+
+    setHighlightedId(pendingRevealId);
+    setPendingRevealId(null);
+    if (highlightTimer.current !== null) {
+      window.clearTimeout(highlightTimer.current);
+    }
+    highlightTimer.current = window.setTimeout(() => {
+      highlightTimer.current = null;
+      setHighlightedId(null);
+    }, FOCUS_HIGHLIGHT_MS);
+  }, [pendingRevealId, messages]);
+
+  // Never leave a highlight timer running after the tab unmounts.
+  useEffect(() => {
+    return () => {
+      if (highlightTimer.current !== null) {
+        window.clearTimeout(highlightTimer.current);
+        highlightTimer.current = null;
+      }
+    };
+  }, []);
+
   const ordered = [...messages].reverse();
   const dayGroups = groupMessagesByDay(ordered, (sentAt) =>
     formatDayHeading(sentAt, interval.timezone, dateFormat),
@@ -149,6 +309,25 @@ export function RunMessagesTab({
       {olderError === null ? null : (
         <Alert tone="error" title="Could not load older messages">
           {olderError.message}
+        </Alert>
+      )}
+
+      {focusLoading ? (
+        <p role="status" className="text-xs text-slate-500">
+          Loading older messages to find the cited message…
+        </p>
+      ) : null}
+
+      {focusMissingId === null ? null : (
+        <Alert tone="warning" title="Cited message not found">
+          The cited message is not among the loaded source messages. It may fall
+          outside this run&apos;s period, or it may have been removed.
+        </Alert>
+      )}
+
+      {focusError === null ? null : (
+        <Alert tone="error" title="Could not load the cited message">
+          {focusError.message}
         </Alert>
       )}
 
@@ -187,7 +366,7 @@ export function RunMessagesTab({
             role="region"
             aria-label="Summary source message history"
             tabIndex={0}
-            className="max-h-[60vh] overflow-y-auto overscroll-contain rounded-xl border border-slate-200 bg-slate-50/60 p-4 pr-2"
+            className="relative max-h-[60vh] overflow-y-auto overscroll-contain rounded-xl border border-slate-200 bg-slate-50/60 p-4 pr-2"
           >
             <div className="space-y-4">
               {dayGroups.map((group) => (
@@ -197,7 +376,22 @@ export function RunMessagesTab({
                   </p>
                   <ol className="space-y-4">
                     {group.messages.map((message) => (
-                      <li key={message.id}>
+                      <li
+                        key={message.id}
+                        ref={(element) => {
+                          if (element === null) {
+                            messageRefs.current.delete(message.id);
+                          } else {
+                            messageRefs.current.set(message.id, element);
+                          }
+                        }}
+                        data-message-id={message.id}
+                        className={`rounded-xl transition-shadow ${
+                          message.id === highlightedId
+                            ? "bg-amber-50/70 ring-2 ring-amber-400 ring-offset-2 ring-offset-slate-50"
+                            : ""
+                        }`}
+                      >
                         <MessageBubble
                           message={message}
                           timeZone={interval.timezone}

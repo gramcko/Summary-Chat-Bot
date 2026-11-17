@@ -211,3 +211,14 @@ workflow: the backend spawns and supervises the `summary-worker` and
   (`COALESCE(gm.name, m.sender_name)`), so an admin rename applies to
   already-captured messages. Message push names are fallback only; the
   InMemoryStore mirrors both behaviors.
+- **Clickable source references (2026-11-16):** each cited message in a
+  run summary is now a link to
+  `/runs/<runId>?tab=messages&message=<messageId>`. The run page reads
+  `tab`/`message` from the URL with `useSearchParams`, opens the
+  "Messages used" tab, and forwards the id to `RunMessagesTab`. That tab
+  walks older pages with the existing `nextCursor`/`MESSAGE_PAGE_SIZE`
+  pagination (bounded to 40 fetches) until the cited message is loaded,
+  scrolls it into view inside the scroll container, and highlights it
+  briefly; a message that cannot be found (or falls outside the run's
+  interval) raises an inline alert instead of failing. No new API
+  endpoint or contract field was added.

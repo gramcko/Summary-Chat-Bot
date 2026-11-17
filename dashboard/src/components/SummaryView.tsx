@@ -6,8 +6,9 @@ import type {
   Summary,
   TaskItem,
 } from "@summarly/contracts";
+import Link from "next/link";
 import type { ReactNode } from "react";
-import { pluralize } from "@/lib/format";
+import { pluralize, sourceMessageHref } from "@/lib/format";
 import {
   DEFAULT_DATE_FORMAT,
   formatDateTime,
@@ -49,9 +50,37 @@ interface SourceRefListProps {
   refs: readonly SourceRef[];
   timeZone?: string;
   dateFormat: DateFormat;
+  /** When set, each cited message links to its row in the run's Messages tab. */
+  runId?: string;
 }
 
-function SourceRefList({ refs, timeZone, dateFormat }: SourceRefListProps) {
+function SourceRefContent({
+  sourceRef,
+  timeZone,
+  dateFormat,
+}: {
+  sourceRef: SourceRef;
+  timeZone?: string;
+  dateFormat: DateFormat;
+}) {
+  return (
+    <>
+      <code className="break-all font-mono text-[11px] text-slate-700">
+        {sourceRef.messageId}
+      </code>
+      <span className="text-slate-500">
+        sent {formatDateTime(sourceRef.sentAt, timeZone, dateFormat)}
+      </span>
+    </>
+  );
+}
+
+function SourceRefList({
+  refs,
+  timeZone,
+  dateFormat,
+  runId,
+}: SourceRefListProps) {
   if (refs.length === 0) {
     return (
       <p className="mt-1 text-xs text-slate-500">No source messages cited.</p>
@@ -66,12 +95,25 @@ function SourceRefList({ refs, timeZone, dateFormat }: SourceRefListProps) {
       <ul className="mt-1.5 space-y-1">
         {refs.map((ref, index) => (
           <li key={`${ref.messageId}-${index}`} className="flex flex-wrap gap-x-2">
-            <code className="break-all font-mono text-[11px] text-slate-700">
-              {ref.messageId}
-            </code>
-            <span className="text-slate-500">
-              sent {formatDateTime(ref.sentAt, timeZone, dateFormat)}
-            </span>
+            {runId === undefined ? (
+              <SourceRefContent
+                sourceRef={ref}
+                timeZone={timeZone}
+                dateFormat={dateFormat}
+              />
+            ) : (
+              <Link
+                href={sourceMessageHref(runId, ref.messageId)}
+                aria-label={`Open source message in Messages used: ${ref.messageId}`}
+                className="-mx-1 flex flex-wrap gap-x-2 rounded px-1 py-0.5 text-slate-600 transition-colors hover:bg-brand-50 hover:text-brand-800 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-brand-600"
+              >
+                <SourceRefContent
+                  sourceRef={ref}
+                  timeZone={timeZone}
+                  dateFormat={dateFormat}
+                />
+              </Link>
+            )}
           </li>
         ))}
       </ul>
@@ -84,6 +126,7 @@ interface ClaimListProps {
   emptyLabel: string;
   timeZone?: string;
   dateFormat: DateFormat;
+  runId?: string;
 }
 
 function ClaimList({
@@ -91,6 +134,7 @@ function ClaimList({
   emptyLabel,
   timeZone,
   dateFormat,
+  runId,
 }: ClaimListProps) {
   if (items.length === 0) {
     return <p className="text-sm text-slate-500">{emptyLabel}</p>;
@@ -107,6 +151,7 @@ function ClaimList({
             refs={item.sourceRefs}
             timeZone={timeZone}
             dateFormat={dateFormat}
+            runId={runId}
           />
         </li>
       ))}
@@ -118,9 +163,10 @@ interface TaskListProps {
   tasks: readonly TaskItem[];
   timeZone?: string;
   dateFormat: DateFormat;
+  runId?: string;
 }
 
-function TaskList({ tasks, timeZone, dateFormat }: TaskListProps) {
+function TaskList({ tasks, timeZone, dateFormat, runId }: TaskListProps) {
   if (tasks.length === 0) {
     return <p className="text-sm text-slate-500">No tasks were reported.</p>;
   }
@@ -166,6 +212,7 @@ function TaskList({ tasks, timeZone, dateFormat }: TaskListProps) {
                   refs={task.sourceRefs}
                   timeZone={timeZone}
                   dateFormat={dateFormat}
+                  runId={runId}
                 />
               </td>
             </tr>
@@ -230,6 +277,11 @@ export interface SummaryViewProps {
   timeZone?: string;
   /** Display date format for source timestamps and due dates. */
   dateFormat?: DateFormat;
+  /**
+   * The run that produced this summary. When set, each cited source message
+   * links to its row in the run's "Messages used" tab.
+   */
+  runId?: string;
 }
 
 /** Renders a validated `SummaryResult` (packages/contracts). */
@@ -237,6 +289,7 @@ export function SummaryView({
   summary,
   timeZone,
   dateFormat = DEFAULT_DATE_FORMAT,
+  runId,
 }: SummaryViewProps) {
   const { result } = summary;
 
@@ -285,6 +338,7 @@ export function SummaryView({
                 emptyLabel="No confirmed decisions were reported."
                 timeZone={timeZone}
                 dateFormat={dateFormat}
+                runId={runId}
               />
             </div>
           </div>
@@ -296,6 +350,7 @@ export function SummaryView({
                 emptyLabel="No proposals were reported."
                 timeZone={timeZone}
                 dateFormat={dateFormat}
+                runId={runId}
               />
             </div>
           </div>
@@ -309,6 +364,7 @@ export function SummaryView({
                 emptyLabel="No unresolved questions were reported."
                 timeZone={timeZone}
                 dateFormat={dateFormat}
+                runId={runId}
               />
             </div>
           </div>
@@ -323,6 +379,7 @@ export function SummaryView({
           tasks={result.tasks}
           timeZone={timeZone}
           dateFormat={dateFormat}
+          runId={runId}
         />
       </Section>
 
